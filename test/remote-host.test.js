@@ -121,26 +121,53 @@ test('five failed handshakes lock the address out; a good one is refused until t
   const locked = await connect(s.port, { secret: C.newSecret() });
   assert.equal(locked.rejected, true, 'locked out: answered with no');
   assert.equal((await connect(s.port)).rejected, true, 'a correct secret is still refused while locked');
-  t += 30000;
-  assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true, 'still locked halfway');
+  t += 29000; // t0 + 30s
+  for (let i = 0; i < 6; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true, 'still locked halfway');
   assert.equal(s.host.status().clients, 0);
-  t += 31000; // 61s after the real failures: attempts while locked did not extend the lock
+  t += 31000; // t0 + 61s: attempts made while locked were not recorded as failures, so the lock ends on schedule
   const ok = await connect(s.port);
   assert.equal(ok.rejected, undefined);
   ok.close();
   await s.host.close();
 });
 
-test('a locked address does not take pending slots', async () => {
-  let t = 1000;
-  const s = await started({ now: () => t });
+// A raw peer that never closes its own side; resolves with the first line the host sends (or null if it just closes).
+function rawPeer(port) {
+  return new Promise((resolve) => {
+    const sock = net.connect({ host: '127.0.0.1', port, allowHalfOpen: true });
+    sock.setEncoding('utf8');
+    sock.on('error', () => {});
+    const peer = { sock, hostClosed: new Promise((r) => { sock.on('end', r); sock.on('close', r); }) };
+    let got = false;
+    sock.on('data', (d) => { if (!got) { got = true; resolve({ ...peer, line: d.trim() }); } });
+    sock.on('close', () => { if (!got) resolve({ ...peer, line: null }); });
+  });
+}
+
+test('a locked address never takes pending slots: the cap is never hit, every attempt still gets no', async () => {
+  const s = await started({ now: () => 1000 });
   for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
-  for (let i = 0; i < 20; i++) assert.equal((await connect(s.port)).rejected, true);
-  t += 61000;
-  const ok = await connect(s.port);
-  assert.equal(ok.rejected, undefined);
-  ok.close();
+  const peers = [];
+  for (let i = 0; i < 20; i++) { // more than the 16 pending slots, held open from the client side
+    const p = await rawPeer(s.port);
+    assert.equal(p.line, JSON.stringify({ t: 'no' }), 'attempt ' + i + ' answered with no, not dropped');
+    peers.push(p);
+  }
+  for (const p of peers) p.sock.destroy();
   await s.host.close();
+});
+
+test('a locked peer that keeps its side open is closed by the host, and close() does not hang', async () => {
+  const s = await started({ now: () => 1000 });
+  for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
+  const peers = [];
+  for (let i = 0; i < 8; i++) peers.push(await rawPeer(s.port));
+  const timeout = new Promise((r) => setTimeout(() => r('timeout'), 2500));
+  for (const p of peers) assert.notEqual(await Promise.race([p.hostClosed.then(() => 'closed'), timeout]), 'timeout', 'host closed its side');
+  const t0 = Date.now();
+  await s.host.close();
+  assert.ok(Date.now() - t0 < 500, 'close() resolves promptly');
+  for (const p of peers) p.sock.destroy();
 });
 
 test('lock expiry lets a correct client in', async () => {

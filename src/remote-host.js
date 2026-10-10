@@ -87,11 +87,22 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
   }
 
+  // Answer "no", then close our side for good (a peer that keeps its half open must not hold the socket).
+  function sayNo(sock) {
+    sockets.add(sock);
+    sock.on('error', () => {});
+    sock.on('close', () => sockets.delete(sock));
+    const safety = setTimeout(() => sock.destroy(), 2000);
+    safety.unref();
+    sock.once('close', () => clearTimeout(safety));
+    sock.end(JSON.stringify({ t: 'no' }) + '\n', () => sock.destroy());
+  }
+
   function onConnection(sock) {
     const addr = sock.remoteAddress || '';
     if (!server) { sock.destroy(); return; }
     // A locked address gets the plain "no" (no failure recorded, no pending slot), so the client can say why.
-    if (locked(addr)) { sock.on('error', () => {}); sock.end(JSON.stringify({ t: 'no' }) + '\n'); return; }
+    if (locked(addr)) { sayNo(sock); return; }
     if (pending >= MAX_PENDING) { sock.destroy(); return; }
     sockets.add(sock);
     sock.setEncoding('utf8');
@@ -109,16 +120,17 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     const reader = C.createLineReader(onLine, C.MAX_PRE_AUTH_LINE);
 
     function refuse() {
+      clearTimeout(timer);
       noteFailure(addr);
       log({ result: 'refused' });
-      sock.end(JSON.stringify({ t: 'no' }) + '\n');
+      sayNo(sock);
     }
 
     function handshake(line) {
       if (finished) return;
       finished = true;
       if (!server) { sock.destroy(); return; }
-      if (locked(addr)) { clearTimeout(timer); done(); sock.end(JSON.stringify({ t: 'no' }) + '\n'); return; }
+      if (locked(addr)) { clearTimeout(timer); done(); sayNo(sock); return; }
       let m;
       try { m = JSON.parse(line); } catch { return refuse(); }
       const dev = m && typeof m === 'object' ? (getDevices() || []).find((d) => d.id === m.dev) : null;

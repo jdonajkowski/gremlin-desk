@@ -164,7 +164,7 @@ test('a locked-out address is told the pairing was rejected, not "could not conn
   await h.host.close();
 });
 
-test('a host that cannot prove it holds the secret is not trusted',async () => {
+test('a host that cannot prove it holds the secret is not trusted', async () => {
   const net = require('net');
   const fake = net.createServer((sock) => {
     sock.setEncoding('utf8');
