@@ -179,7 +179,8 @@ test('attach returns the replay buffer, then live output only to attached client
 });
 
 test('restarted clears the replay buffer and tells everyone; exited and projectsChanged reach everyone', async () => {
-  const s = await started();
+  let name = 'one';
+  const s = await started({ snapshot: () => ({ list: [{ id: 'p1', name }], open: ['p1'], git: {} }) });
   const a = await connect(s.port);
   await a.next();
   s.host.output('p1', 'old');
@@ -189,6 +190,7 @@ test('restarted clears the replay buffer and tells everyone; exited and projects
   s.host.exited('p1', 3);
   assert.deepEqual(await a.until((m) => m.t === 'exit'), { t: 'exit', id: 'p1', code: 3 });
   assert.equal((await a.request('attach', { id: 'p1' })).data.exitCode, 3, 'a late viewer learns the session ended');
+  name = 'renamed';
   s.host.projectsChanged();
   assert.equal((await a.until((m) => m.t === 'projects')).list[0].id, 'p1');
   s.host.projectsChanged(); // unchanged: not sent again
@@ -349,5 +351,23 @@ test('restarted forgets a half-finished escape sequence from the previous proces
   s.host.broadcast('workers', { id: 'p1', events: [] });
   assert.equal((await a.next()).t, 'workers', 'no progress event from the stitched fragments');
   a.close();
+  await s.host.close();
+});
+
+test('projectsChanged: a client that connected while the list was Y still hears when it returns to X', async () => {
+  let name = 'X';
+  const s = await started({ snapshot: () => ({ list: [{ id: 'p1', name }], open: ['p1'], git: {} }) });
+  const a = await connect(s.port);
+  assert.equal((await a.next()).list[0].name, 'X');
+  s.host.projectsChanged(); // lastProjects = X
+  a.close();
+  while (s.host.status().clients) await new Promise((r) => setTimeout(r, 10));
+  name = 'Y';
+  const b = await connect(s.port);
+  assert.equal((await b.next()).list[0].name, 'Y');
+  name = 'X';
+  s.host.projectsChanged();
+  assert.equal((await b.until((m) => m.t === 'projects')).list[0].name, 'X');
+  b.close();
   await s.host.close();
 });

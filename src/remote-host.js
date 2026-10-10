@@ -130,7 +130,9 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       reader.setMax(C.MAX_LINE);
       clients.add(c);
       onDeviceSeen(dev.id);
-      sendTo(c, 'projects', snapshot());
+      const snap = snapshot();
+      lastProjects = JSON.stringify(snap); // what the newest client holds, so projectsChanged compares against it
+      sendTo(c, 'projects', snap);
     }
 
     function onLine(line) {
@@ -141,7 +143,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
 
     sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel) noteFailure(addr); sock.destroy(); } });
-    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); });
+    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); if (!clients.size) lastProjects = ''; });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 
