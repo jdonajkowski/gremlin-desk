@@ -15,11 +15,13 @@
   };
 
   // kind: 'attention' (needs you) or 'finished' (the turn ended); reason: what the hook reported, if anything.
-  function message(kind, project, reason) {
+  function message(kind, project, reason, host) {
     const name = project || 'a project';
-    if (kind === 'finished') return { title: 'Claude finished', body: name };
+    // host: set for a session on another computer, so the notification says where it is.
+    const where = typeof host === 'string' && host.trim() ? `${name} on ${host.trim()}` : name;
+    if (kind === 'finished') return { title: 'Claude finished', body: where };
     const why = REASONS[reason] || (typeof reason === 'string' && reason.trim()) || 'Waiting for you';
-    return { title: 'Claude needs your input', body: `${name}\n${why}` };
+    return { title: 'Claude needs your input', body: `${where}\n${why}` };
   }
 
   const api = { shouldNotify, message };

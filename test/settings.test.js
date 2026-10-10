@@ -66,3 +66,10 @@ test('launchOnStartup and startMinimized are booleans', () => {
   assert.deepEqual(normalize({ launchOnStartup: 1, startMinimized: 0 }, defaults).values, { launchOnStartup: true, startMinimized: false });
   assert.deepEqual(normalize({}, defaults).values, {});
 });
+
+test('notifyRemote is a boolean, kept in values and shown in the form', () => {
+  assert.deepEqual(normalize({ notifyRemote: 0 }, defaults).values, { notifyRemote: false });
+  assert.deepEqual(normalize({ notifyRemote: 'on' }, defaults).values, { notifyRemote: true });
+  assert.equal('notifyRemote' in normalize({}, defaults).values, false);
+  assert.equal(toForm({ notifyRemote: true }).notifyRemote, true);
+});

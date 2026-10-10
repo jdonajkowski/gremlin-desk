@@ -39,11 +39,13 @@
   // A desktop notification (shown by main.js) for a session you are not looking at: Gremlin is in the background,
   // or that session is not on screen. Whether the setting is on is checked by main.
   function notify(id, kind, reason) {
-    if (isRemote(id)) return; // phase 1: no desktop notifications for remote sessions
+    const remote = isRemote(id);
+    if (remote && cfg.notifyRemote === false) return; // "Also notify for sessions on other computers" is off
     const shownIds = activeId && terminals.has(activeId) ? currentLayout().front.filter(Boolean) : [];
     if (!WidgetNotify.shouldNotify({ enabled: true, id, windowFocused: document.hasFocus(), shownIds })) return;
     const p = projects.find((x) => x.id === id);
-    widget.notify.show({ id, ...WidgetNotify.message(kind, p && p.name, reason) });
+    const host = remote && p && p.remote ? p.remote.hostName : undefined;
+    widget.notify.show({ id, ...WidgetNotify.message(kind, p && p.name, reason, host) });
   }
   const update = (id, ev) => {
     if (isAux(id)) return;
@@ -78,7 +80,7 @@
   }
 
   // --- Terminals ----------------------------------------------------------
-  function applyProgress(id, state, value) {
+  function applyProgress(id, state, value, { silent = false } = {}) {
     if (isAux(id)) return;
     const s = sess(id);
     s.progress = { state, value };
@@ -87,7 +89,7 @@
     const ended = state === 0 && s.turnStart !== null;
     trackTurn(s, state);
     update(id, { t: 'progress', state });
-    if (ended) notify(id, 'finished');
+    if (ended && !silent) notify(id, 'finished');
     // Claude may have added or removed files during the turn.
     if (ended && id === activeId) filesPane.refresh();
     if (id === activeId) { renderProgress(); renderFooter(); }
@@ -134,7 +136,7 @@
     replaying.add(id);
     terminals.write(id, data, () => {
       replaying.delete(id);
-      if (progress) applyProgress(id, progress.state, progress.value || 0); // where the turn is now, not what the replayed history says
+      if (progress) applyProgress(id, progress.state, progress.value || 0, { silent: true }); // quietly: where the turn is now, not what the replayed history says
     });
   });
   widget.remote.onReset(({ id }) => terminals.reset(id));
@@ -286,8 +288,28 @@
     rail.render(WidgetRail.withHeaders(projects, remoteHosts), { active: activeId, open: openIds, dot: (id) => SS.dot(sess(id).state), git: (id) => WidgetGitBadge.badge(gitAll[id]) });
   }
 
+  // A dropped connection sends no exit, so a turn in flight would stay open and end with a late "finished" on reconnect.
+  // Once per host going offline, close those turns quietly (no notification, the sessions are not marked exited).
+  const hostWasOnline = new Map();
+  function dropTurnsOfOfflineHosts() {
+    for (const h of remoteHosts) {
+      const online = h.state === 'online';
+      if (hostWasOnline.get(h.id) !== false && !online) {
+        for (const [id, s] of cache) {
+          if (!id.startsWith(`r:${h.id}/`) || (s.turnStart === null && !s.state.working)) continue;
+          s.progress = { state: 0, value: 0 };
+          trackTurn(s, 0);
+          update(id, { t: 'progress', state: 0 });
+          if (id === activeId) { renderProgress(); renderFooter(); }
+        }
+      }
+      hostWasOnline.set(h.id, online);
+    }
+  }
+
   widget.projects.onList(({ list, open, remoteHosts: hosts }) => {
     remoteHosts = hosts || [];
+    dropTurnsOfOfflineHosts();
     projects = list;
     openIds = new Set(open);
     renderRail();
@@ -1104,7 +1126,8 @@
     toast(on ? 'Pinned on top' : 'Unpinned');
   };
   $('btn-settings').onclick = () => widget.openConfig();
-  widget.onConfigChanged(({ alwaysOnTop, showSysmon: sm, showMascot, guardMinutes }) => {
+  widget.onConfigChanged(({ alwaysOnTop, showSysmon: sm, showMascot, guardMinutes, notifyRemote }) => {
+    if (notifyRemote !== undefined) cfg.notifyRemote = notifyRemote;
     pinBtn.classList.toggle('on', alwaysOnTop);
     if (sm !== undefined) { showSysmon = sm; sysEl.hidden = !sm; updateSide(); }
     if (showMascot !== undefined) document.body.classList.toggle('no-mascot', !showMascot);

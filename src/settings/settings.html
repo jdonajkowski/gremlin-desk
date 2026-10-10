@@ -36,6 +36,7 @@
         <select name="guardMode"><option value="ask">Claude asks first (recommended)</option><option value="log">Only log them, with their undo</option><option value="off">Off</option></select></label>
       <label class="check"><input type="checkbox" name="showSysmon"> Show CPU, memory and GPU in the side panel</label>
       <label class="check"><input type="checkbox" name="notifications"> Show a desktop notification when Claude needs me or finishes in a session I am not looking at</label>
+      <label class="check"><input type="checkbox" name="notifyRemote"> Also notify for sessions on other computers (needs the setting above)</label>
       <label class="check"><input type="checkbox" name="showMascot"> Show Glitch, the gremlin peeking up at the bottom of the project list</label>
       <label>Glitch guards the terminal after (minutes)<span class="hint">With no typing, clicking or Claude activity, he climbs out and keeps watch until you're back. 0 turns it off</span><input name="guardMinutes" type="number" min="0" max="240"></label>
       <label class="check"><input type="checkbox" name="autoOpenDevServer"> Open dev servers started from the Run menu in the built-in browser</label>

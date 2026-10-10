@@ -54,6 +54,7 @@ function normalize(form, defaults) {
   if ('showInTaskbar' in f) values.showInTaskbar = !!f.showInTaskbar;
   if ('restoreSessions' in f) values.restoreSessions = !!f.restoreSessions;
   if ('notifications' in f) values.notifications = !!f.notifications;
+  if ('notifyRemote' in f) values.notifyRemote = !!f.notifyRemote;
   if ('launchOnStartup' in f) values.launchOnStartup = !!f.launchOnStartup;
   if ('startMinimized' in f) values.startMinimized = !!f.startMinimized;
   if ('claudeHooks' in f) values.claudeHooks = !!f.claudeHooks;
