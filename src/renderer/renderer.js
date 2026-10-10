@@ -23,7 +23,7 @@
   const cache = new Map();
   const sess = (id) => {
     if (!cache.has(id)) {
-      cache.set(id, { state: SS.initial(), workerEvents: [], tools: new Map(), status: null, git: null, progress: { state: 0, value: 0 }, turnStart: null, lastTurnMs: null });
+      cache.set(id, { state: SS.initial(), workerEvents: [], hiddenWorkers: new Set(), tools: new Map(), status: null, git: null, progress: { state: 0, value: 0 }, turnStart: null, lastTurnMs: null });
     }
     return cache.get(id);
   };
@@ -51,6 +51,7 @@
     s.state = SS.apply(s.state, ev, id === activeId);
     renderRail();
     renderMascot();
+    if (id === activeId) updateAsk();
     if (Object.keys(tabLinks).length) renderStrips(currentLayout()); // the state dot on a project's tab
   };
 
@@ -119,6 +120,9 @@
     s.progress = { state: 0, value: 0 };
     trackTurn(s, 0);
     update(id, { t: 'exit' });
+    // Claude is gone, so its workers are too: stop their rows showing as running.
+    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, Date.now()));
+    renderMascot();
     if (id === activeId) renderActive();
     renderTaskbar();
   });
@@ -399,6 +403,7 @@
     if (L.focused === id) return;
     setZst(Z.show(zst(), tabIds(), id));
     renderStrips(currentLayout());
+    updateAsk();
   }
 
   function moveTab(id, zone) {
@@ -711,6 +716,7 @@
   const sideEl = $('side');
   const workersEl = $('workers');
   const countEl = $('workers-count');
+  const clearBtn = $('workers-clear');
   const footerEl = $('footer');
   let workerCount = 0;
   const sysEl = $('sysmon');
@@ -909,7 +915,7 @@
 
   function renderWorkers() {
     const now = Date.now();
-    const workers = activeId ? WidgetWorkers.reduce(sess(activeId).workerEvents, now) : [];
+    const workers = activeId ? WidgetWorkers.visible(WidgetWorkers.reduce(sess(activeId).workerEvents, now), sess(activeId).hiddenWorkers) : [];
     const shown = workers.slice(0, MAX_ROWS);
     const keep = new Set(shown.map((w) => w.id));
     for (const [id, el] of rowEls) if (!keep.has(id)) { el.remove(); rowEls.delete(id); }
@@ -944,8 +950,38 @@
     $('mini-count').textContent = running ? String(running) : '';
     $('mini-count').classList.toggle('idle', running === 0);
     workerCount = workers.length;
+    clearBtn.disabled = workers.length === 0;
+    updateAsk();
     updateSide();
   }
+
+  // Hides the rows only: Claude Code owns the processes, nothing here stops them.
+  clearBtn.addEventListener('click', () => {
+    if (!activeId) return;
+    const s = sess(activeId);
+    const now = Date.now();
+    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, now, { immediate: true }));
+    for (const w of WidgetWorkers.reduce(s.workerEvents, now)) s.hiddenWorkers.add(w.id); // rows already done can't be stopped again
+    renderWorkers();
+    renderMascot();
+  });
+
+  const ASK_CLOSE_TEXT = 'Please check your background tasks, shells, monitors and subagents. Stop the ones you no longer need, keep anything I still depend on such as dev servers I asked for, and tell me what you stopped and what is still running.';
+  // The active project's Claude terminal while it is focused and running.
+  function askTarget() {
+    if (!activeId || promptTarget() !== activeId) return null; // an aux tab or another pane has focus
+    const t = terminals.get(activeId);
+    return t && !t.exited ? activeId : null;
+  }
+  function updateAsk() { const askBtn = $('workers-ask'); askBtn.disabled = !askTarget() || sess(activeId).state.attention; } // a function declaration: update() and focusTab() may call it early
+  $('workers-ask').addEventListener('click', () => {
+    const target = askTarget();
+    if (!target) return toast('Focus a Claude session first');
+    if (sess(target).state.attention) return toast('Claude is waiting for your answer. Answer it first.');
+    typeIntoClaude(target, ASK_CLOSE_TEXT, true);
+    toast('Asked Claude to close what it no longer needs');
+    terminals.focus();
+  });
 
   widget.workers.onEvents(({ id, events }) => {
     const s = sess(id);
@@ -968,6 +1004,7 @@
     if (!activeId) return;
     const s = sess(activeId);
     if (s.workerEvents.length) renderWorkers();
+    else updateAsk();
     if (s.turnStart !== null) renderFooter();
     if (!jobsEl.hidden) renderJobs();
   }, 1000);
@@ -1198,7 +1235,9 @@
   let savedPrompts = [];
   widget.prompts.get().then((list) => { savedPrompts = list; });
   const savePrompts = async (list) => { savedPrompts = await widget.prompts.set(list); };
-  const promptTarget = () => { const L = currentLayout(); return L.focused && !L.focused.startsWith('aux:') && terminals.has(L.focused) ? L.focused : null; }; // Claude sessions only: a shell would run the text
+  function promptTarget() { const L = currentLayout(); return L.focused && !L.focused.startsWith('aux:') && terminals.has(L.focused) ? L.focused : null; } // Claude sessions only: a shell would run the text
+  // Bracketed paste into a Claude terminal (local or remote: the write goes through the pty bridge), optionally submitted.
+  function typeIntoClaude(id, text, submit) { widget.pty.write(id, `\x1b[200~${text}\x1b[201~${submit ? '\r' : ''}`); }
   const promptsPalette = WidgetSwitcher.createSwitcher({
     el: $('prompts'),
     emptyText: 'No saved prompts. Ctrl+N makes one.',
@@ -1208,7 +1247,7 @@
       const p = savedPrompts.find((x) => x.id === id);
       const target = promptTarget();
       if (!p || !target) return toast('Focus a Claude session first');
-      widget.pty.write(target, `\x1b[200~${p.text}\x1b[201~${inTab ? '\r' : ''}`);
+      typeIntoClaude(target, p.text, inTab);
     },
     onKey: (e, item, api) => {
       if (e.ctrlKey && e.key.toLowerCase() === 'n') {
