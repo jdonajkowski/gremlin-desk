@@ -18,8 +18,8 @@ function createScanner() {
         end = SEQ.lastIndex;
       }
       const tail = text.slice(end);
-      const esc = tail.lastIndexOf('\x1b');
-      if (esc !== -1 && tail.length - esc <= MAX_PARTIAL) pending = tail.slice(esc);
+      const esc = tail.indexOf('\x1b', Math.max(0, tail.length - MAX_PARTIAL));
+      if (esc !== -1) pending = tail.slice(esc);
       return out;
     }
   };

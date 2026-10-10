@@ -24,6 +24,12 @@ test('ignores other OSC sequences and plain output', () => {
   assert.deepEqual(s.feed('\x1b]0;title\x07\x1b]9;1;note\x07 plain'), []);
 });
 
+test('a sequence whose ST terminator is split across chunks is found once', () => {
+  const s = createScanner();
+  assert.deepEqual(s.feed('a\x1b]9;4;3\x1b'), []);
+  assert.deepEqual(s.feed('\\b'), [{ state: 3, value: 0 }]);
+});
+
 test('a lone escape at the end of a chunk does not swallow later output', () => {
   const s = createScanner();
   assert.deepEqual(s.feed('x\x1b'), []);
