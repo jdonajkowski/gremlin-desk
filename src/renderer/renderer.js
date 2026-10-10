@@ -119,6 +119,9 @@
     s.progress = { state: 0, value: 0 };
     trackTurn(s, 0);
     update(id, { t: 'exit' });
+    // Claude is gone, so its workers are too: stop their rows showing as running.
+    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, Date.now()));
+    renderMascot();
     if (id === activeId) renderActive();
     renderTaskbar();
   });
@@ -711,6 +714,8 @@
   const sideEl = $('side');
   const workersEl = $('workers');
   const countEl = $('workers-count');
+  const clearBtn = $('workers-clear');
+  const askBtn = $('workers-ask');
   const footerEl = $('footer');
   let workerCount = 0;
   const sysEl = $('sysmon');
@@ -944,8 +949,33 @@
     $('mini-count').textContent = running ? String(running) : '';
     $('mini-count').classList.toggle('idle', running === 0);
     workerCount = workers.length;
+    clearBtn.disabled = workers.length === 0;
+    askBtn.disabled = !askTarget();
     updateSide();
   }
+
+  // Hides the rows only: Claude Code owns the processes, nothing here stops them.
+  clearBtn.addEventListener('click', () => {
+    if (!activeId) return;
+    const s = sess(activeId);
+    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, Date.now(), { immediate: true }));
+    renderWorkers();
+    renderMascot();
+  });
+
+  const ASK_CLOSE_TEXT = 'Please check your background tasks, shells, monitors and subagents. Stop the ones you no longer need, keep anything I still depend on such as dev servers I asked for, and tell me what you stopped and what is still running.';
+  // The active project's Claude terminal while it is focused and running.
+  function askTarget() {
+    if (!activeId || promptTarget() !== activeId) return null; // an aux tab or another pane has focus
+    const t = terminals.get(activeId);
+    return t && !t.exited ? activeId : null;
+  }
+  askBtn.addEventListener('click', () => {
+    const target = askTarget();
+    if (!target) return toast('Focus a Claude session first');
+    typeIntoClaude(target, ASK_CLOSE_TEXT, true);
+    toast('Asked Claude to close what it no longer needs');
+  });
 
   widget.workers.onEvents(({ id, events }) => {
     const s = sess(id);
@@ -1198,7 +1228,9 @@
   let savedPrompts = [];
   widget.prompts.get().then((list) => { savedPrompts = list; });
   const savePrompts = async (list) => { savedPrompts = await widget.prompts.set(list); };
-  const promptTarget = () => { const L = currentLayout(); return L.focused && !L.focused.startsWith('aux:') && terminals.has(L.focused) ? L.focused : null; }; // Claude sessions only: a shell would run the text
+  function promptTarget() { const L = currentLayout(); return L.focused && !L.focused.startsWith('aux:') && terminals.has(L.focused) ? L.focused : null; } // Claude sessions only: a shell would run the text
+  // Bracketed paste into a Claude terminal (local or remote: the write goes through the pty bridge), optionally submitted.
+  function typeIntoClaude(id, text, submit) { widget.pty.write(id, `\x1b[200~${text}\x1b[201~${submit ? '\r' : ''}`); }
   const promptsPalette = WidgetSwitcher.createSwitcher({
     el: $('prompts'),
     emptyText: 'No saved prompts. Ctrl+N makes one.',
@@ -1208,7 +1240,7 @@
       const p = savedPrompts.find((x) => x.id === id);
       const target = promptTarget();
       if (!p || !target) return toast('Focus a Claude session first');
-      widget.pty.write(target, `\x1b[200~${p.text}\x1b[201~${inTab ? '\r' : ''}`);
+      typeIntoClaude(target, p.text, inTab);
     },
     onKey: (e, item, api) => {
       if (e.ctrlKey && e.key.toLowerCase() === 'n') {

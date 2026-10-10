@@ -114,6 +114,19 @@ body.transparent #frame { background: transparent; }
   color: var(--accent);
   background: rgba(217, 119, 87, 0.12);
 }
+#workers-head .w-btn {
+  flex-shrink: 0;
+  padding: 0 6px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font: 10px/14px 'Segoe UI', system-ui, sans-serif;
+  cursor: pointer;
+}
+#workers-head .w-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.08); color: #e8e6e3; }
+#workers-head .w-btn:disabled { opacity: 0.4; cursor: default; }
 #workers-count.idle { color: var(--muted); background: rgba(255, 255, 255, 0.05); }
 #workers { flex: 1; min-height: 0; padding: 6px 10px; overflow: hidden; }
 
