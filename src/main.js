@@ -964,7 +964,7 @@ ipcMain.handle('git:all', () => ({ ...lastAllGit, ...remote.git() }));
 
 // One at a time: two overlapping runs could leave a second server listening.
 let applying = Promise.resolve();
-const applyRemoteHost = () => (applying = applying.then(applyRemoteHostNow));
+const applyRemoteHost = () => (applying = applying.then(applyRemoteHostNow).catch((err) => { remoteError = err.message; }));
 async function applyRemoteHostNow() {
   await remoteHost.close();
   remoteError = '';

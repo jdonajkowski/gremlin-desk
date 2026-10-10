@@ -5,7 +5,7 @@ const C = require('../src/remote-crypto');
 
 test('isPrivateV4 / isListenable: private ranges and loopback only', () => {
   for (const ok of ['10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.20', '100.64.0.1', '100.127.9.9']) assert.ok(R.isPrivateV4(ok), ok);
-  for (const no of ['8.8.8.8', '172.32.0.1', '172.15.0.1', '100.128.0.1', '0.0.0.0', '127.0.0.1', '::1', '', 'host', undefined]) assert.ok(!R.isPrivateV4(no), String(no));
+  for (const no of ['8.8.8.8', '172.32.0.1', '172.15.0.1', '100.128.0.1', '0.0.0.0', '10.999.1.1', '010.0.0.1', '192.168.1.256', '127.0.0.1', '::1', '', 'host', undefined]) assert.ok(!R.isPrivateV4(no), String(no));
   assert.ok(R.isListenable('127.0.0.1'));
   assert.ok(R.isListenable('192.168.1.20'));
   assert.ok(!R.isListenable('0.0.0.0'));

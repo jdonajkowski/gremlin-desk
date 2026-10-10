@@ -15,7 +15,8 @@ const portOk = (p) => Number.isInteger(p) && p >= 1024 && p <= 65535;
 const hex8 = () => crypto.randomBytes(4).toString('hex');
 
 function isPrivateV4(addr) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(addr));
+  const o = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'; // 0-255, no leading zeros
+  const m = new RegExp(`^${o}\\.${o}\\.${o}\\.${o}$`).exec(String(addr));
   if (!m) return false;
   const a = Number(m[1]);
   const b = Number(m[2]);

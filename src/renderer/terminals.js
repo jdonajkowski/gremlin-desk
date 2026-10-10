@@ -26,6 +26,7 @@
           allowNonHttpProtocols: true,
           activate: (_e, uri) => {
             if (/^https?:\/\//i.test(uri)) return widget.openExternal(uri);
+            if (id.startsWith('r:')) return; // a remote terminal's output must not open files from this computer's disk
             // A scheme has 2+ letters, so a drive letter (C:\…) counts as a plain path.
             const target = uri.split(/[?#]/)[0].replace(/(?::\d+)+$/, '');
             const local = /^file:/i.test(target) || !/^[a-z][\w+.-]+:/i.test(target);
@@ -67,6 +68,7 @@
       // Wrapped rows are joined so a long path that spans rows is still one link.
       term.registerLinkProvider({
         provideLinks(y, callback) {
+          if (id.startsWith('r:')) return callback(undefined); // the paths in a remote screen are not this computer's
           const buf = term.buffer.active;
           let first = y - 1;
           while (first > 0 && buf.getLine(first) && buf.getLine(first).isWrapped) first--;

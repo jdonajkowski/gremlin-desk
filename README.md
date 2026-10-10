@@ -86,7 +86,7 @@ Tools that read Claude's folder directly need to be pointed at it, e.g. `CLAUDE_
 
 ### Remote sessions
 
-Attach to Claude sessions on another computer on your network. On the computer that runs the sessions, open Settings → Remote, tick **Allow other computers**, and click **Pair a new device**. On the other computer, Settings → Remote → **Add a computer**, enter the address, port and pairing code. The host's projects appear in your project list with their state; click one to attach, start a session, restart it (Ctrl+Shift+R) or close it. Traffic is encrypted. A pairing code gives full access to the host's sessions (a shell as you), so pair only your own devices and revoke ones you stop using. Files, search, Markdown links, session defaults and spend are not available on remote projects yet.
+Attach to Claude sessions on another computer on your network. On the computer that runs the sessions, open Settings → Remote, tick **Allow other computers**, and click **Pair a new device**. On the other computer, Settings → Remote → **Add a computer**, enter the address, port and pairing code. The host's projects appear in your project list with their state; click one to attach, start a session, restart it (Ctrl+Shift+R) or close it. Traffic is encrypted. The host listens only on private network addresses (or this computer alone), and Windows may ask you to allow Gremlin through the firewall the first time it is turned on. A pairing code gives full access to the host's sessions (a shell as you), so pair only your own devices and revoke ones you stop using. Files, search, Markdown links, session defaults and spend are not available on remote projects yet.
 
 ## Keyboard and mouse
 
