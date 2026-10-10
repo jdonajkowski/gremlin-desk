@@ -32,8 +32,9 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
     const entry = { host, client: null, snapshot: { list: [], open: [], git: {} } };
     entry.client = createClient({
       host,
-      onState: () => onChange(),
+      onState: () => { if (entries.get(host.id) === entry) onChange(); },
       onEvent: (msg) => {
+        if (entries.get(host.id) !== entry) return; // a stopped or replaced client's late events (e.g. 'lost' after stop)
         if (msg.t === 'projects') {
           entry.snapshot = { list: msg.list || [], open: msg.open || [], git: msg.git || {} };
           return onChange();
@@ -64,7 +65,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
   return {
     sync,
     has: (id) => !!parts(id),
-    isOpen: (id) => { const p = parts(id); return !!p && p.entry.snapshot.open.includes(p.projectId); },
+    isOpen: (id) => { const p = parts(id); return !!p && p.entry.client.state().state === 'online' && p.entry.snapshot.open.includes(p.projectId); },
     list: () => [...entries.values()].flatMap((e) => {
       const rows = decorate(e.host.id, e.host.name, e.snapshot.list);
       return e.client.state().state === 'online' ? rows : rows.map((p) => ({ ...p, remote: { ...p.remote, offline: true } }));

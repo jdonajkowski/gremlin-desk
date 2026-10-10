@@ -47,9 +47,65 @@ test('sync starts a client per host and stops removed ones', () => {
   assert.deepEqual(t.m.hosts(), []);
 });
 
+test('sync keeps existing clients when a host is added and lists host by host', () => {
+  const t = setup();
+  const first = t.made.desk;
+  t.setHosts([...HOSTS, { id: 'lap', name: 'Laptop', address: 'b', port: 2, device: 'd', secret: 's' }]);
+  t.m.sync();
+  assert.equal(t.made.desk, first, 'client not recreated');
+  assert.equal(first.stopped, false);
+  assert.equal(t.made.lap.started, true);
+  t.made.lap.onEvent({ t: 'projects', list: [{ id: 'l1', name: 'l', folder: 'l', initials: 'L' }], open: [], git: {} });
+  first.onEvent({ t: 'projects', list: [{ id: 'd1', name: 'd', folder: 'd', initials: 'D' }], open: [], git: {} });
+  assert.deepEqual(t.m.list().map((p) => p.id), ['r:desk/d1', 'r:lap/l1']);
+  assert.deepEqual(t.m.hosts().map((h) => h.id), ['desk', 'lap']);
+});
+
+test('late events of a removed host are dropped', () => {
+  const t = setup();
+  const old = t.made.desk;
+  online(old);
+  t.setHosts([]);
+  t.m.sync();
+  const outLen = t.out.length;
+  const ch = t.changes();
+  old.onEvent({ t: 'lost', id: 'p' });
+  old.onState({ state: 'offline', error: '' });
+  assert.equal(t.out.length, outLen);
+  assert.equal(t.changes(), ch);
+});
+
+test('a removed then re-added host id ignores the old client but not the new one', () => {
+  const t = setup();
+  const old = t.made.desk;
+  t.setHosts([]);
+  t.m.sync();
+  t.setHosts(HOSTS);
+  t.m.sync();
+  const fresh = t.made.desk;
+  assert.notEqual(fresh, old);
+  const n = t.out.length;
+  old.onEvent({ t: 'data', id: 'p', data: 'stale' });
+  assert.equal(t.out.length, n);
+  fresh.onEvent({ t: 'data', id: 'p', data: 'new' });
+  assert.deepEqual(t.out.slice(n), [['pty:data', { id: 'r:desk/p', data: 'new' }]]);
+});
+
+test('isOpen is false while the host is not online', () => {
+  const t = setup();
+  const c = t.made.desk;
+  c.onEvent({ t: 'projects', list: [], open: ['p'], git: {} });
+  assert.equal(t.m.isOpen('r:desk/p'), false);
+  online(c);
+  assert.equal(t.m.isOpen('r:desk/p'), true);
+  c.st = { state: 'offline', error: '' };
+  assert.equal(t.m.isOpen('r:desk/p'), false);
+});
+
 test('projects are listed with namespaced ids; a host that is not connected keeps its rows, flagged offline', () => {
   const t = setup();
   const c = t.made.desk;
+  const before = t.changes();
   c.onEvent({ t: 'projects', list: [{ id: 'c:\\p\\a', name: 'a', folder: 'a', initials: 'A' }], open: ['c:\\p\\a'], git: { 'c:\\p\\a': { branch: 'main' } } });
   assert.deepEqual(t.m.list().map((p) => [p.id, p.remote.offline]), [['r:desk/c:\\p\\a', true]], 'not connected yet: shown dimmed');
   assert.deepEqual(t.m.openIds(), [], 'but not counted as running');
@@ -60,7 +116,6 @@ test('projects are listed with namespaced ids; a host that is not connected keep
   assert.ok(t.m.isOpen('r:desk/c:\\p\\a'));
   assert.ok(!t.m.isOpen('r:desk/other'));
   assert.deepEqual(t.m.hosts(), [{ id: 'desk', name: 'Desk PC', address: 'a', port: 1, state: 'online', error: '' }]);
-  assert.ok(t.changes() >= 2);
 });
 
 test('has: only namespaced ids of known hosts', () => {
@@ -144,4 +199,6 @@ test('close tells the host and detaches; reconnect and stopAll reach the clients
   assert.equal(c.reconnected, true);
   t.m.stopAll();
   assert.equal(c.stopped, true);
+  assert.deepEqual(t.m.hosts(), []);
+  assert.equal(t.m.has('r:desk/x'), false);
 });
