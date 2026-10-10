@@ -29,3 +29,15 @@ test('needs-you messages translate the hook types and pass other text through', 
   assert.equal(message('attention', 'G-Icons').body, 'G-Icons\nWaiting for you');
   assert.equal(message('attention', '', '  ').body, 'a project\nWaiting for you');
 });
+
+test('message names the host for sessions on other computers', () => {
+  assert.deepEqual(message('finished', 'G-Icons', undefined, 'Desk PC'), { title: 'Claude finished', body: 'G-Icons on Desk PC' });
+  assert.deepEqual(message('attention', 'G-Icons', 'permission_prompt', 'Desk PC'), { title: 'Claude needs your input', body: 'G-Icons on Desk PC\nWaiting for your permission' });
+  assert.deepEqual(message('attention', 'App', undefined, 'Desk PC'), { title: 'Claude needs your input', body: 'App on Desk PC\nWaiting for you' });
+});
+
+test('message ignores an empty or non-string host', () => {
+  for (const host of [undefined, null, '', '   ', 5, {}]) {
+    assert.deepEqual(message('finished', 'App', undefined, host), { title: 'Claude finished', body: 'App' });
+  }
+});

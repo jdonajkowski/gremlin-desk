@@ -71,6 +71,7 @@ const DEFAULT_CONFIG = {
   showInTaskbar: false,
   // A desktop notification when Claude needs you or finishes a turn in a session you are not looking at.
   notifications: true,
+  notifyRemote: true,
   // Reopen the projects whose sessions were open when Gremlin last quit (each continues its last conversation).
   restoreSessions: true,
   // Start Gremlin when you sign in (installed app only); open hidden in the tray, or minimized when it is in the taskbar.
@@ -1433,7 +1434,7 @@ ipcMain.handle('settings:save', (_e, formValues) => {
 // Settings the main window applies live, without a restart.
 function rendererToggles() {
   const g = Number(config.guardMinutes);
-  return { showSysmon: config.showSysmon !== false, showMascot: config.showMascot !== false, guardMinutes: Number.isFinite(g) && g >= 0 ? g : 5 };
+  return { showSysmon: config.showSysmon !== false, showMascot: config.showMascot !== false, notifyRemote: config.notifyRemote !== false, guardMinutes: Number.isFinite(g) && g >= 0 ? g : 5 };
 }
 
 function setConfig(values) {
