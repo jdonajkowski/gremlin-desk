@@ -23,7 +23,7 @@
   const cache = new Map();
   const sess = (id) => {
     if (!cache.has(id)) {
-      cache.set(id, { state: SS.initial(), workerEvents: [], tools: new Map(), status: null, git: null, progress: { state: 0, value: 0 }, turnStart: null, lastTurnMs: null });
+      cache.set(id, { state: SS.initial(), workerEvents: [], hiddenWorkers: new Set(), tools: new Map(), status: null, git: null, progress: { state: 0, value: 0 }, turnStart: null, lastTurnMs: null });
     }
     return cache.get(id);
   };
@@ -51,6 +51,7 @@
     s.state = SS.apply(s.state, ev, id === activeId);
     renderRail();
     renderMascot();
+    if (id === activeId) updateAsk();
     if (Object.keys(tabLinks).length) renderStrips(currentLayout()); // the state dot on a project's tab
   };
 
@@ -402,6 +403,7 @@
     if (L.focused === id) return;
     setZst(Z.show(zst(), tabIds(), id));
     renderStrips(currentLayout());
+    updateAsk();
   }
 
   function moveTab(id, zone) {
@@ -715,7 +717,6 @@
   const workersEl = $('workers');
   const countEl = $('workers-count');
   const clearBtn = $('workers-clear');
-  const askBtn = $('workers-ask');
   const footerEl = $('footer');
   let workerCount = 0;
   const sysEl = $('sysmon');
@@ -914,7 +915,7 @@
 
   function renderWorkers() {
     const now = Date.now();
-    const workers = activeId ? WidgetWorkers.reduce(sess(activeId).workerEvents, now) : [];
+    const workers = activeId ? WidgetWorkers.visible(WidgetWorkers.reduce(sess(activeId).workerEvents, now), sess(activeId).hiddenWorkers) : [];
     const shown = workers.slice(0, MAX_ROWS);
     const keep = new Set(shown.map((w) => w.id));
     for (const [id, el] of rowEls) if (!keep.has(id)) { el.remove(); rowEls.delete(id); }
@@ -950,7 +951,7 @@
     $('mini-count').classList.toggle('idle', running === 0);
     workerCount = workers.length;
     clearBtn.disabled = workers.length === 0;
-    askBtn.disabled = !askTarget();
+    updateAsk();
     updateSide();
   }
 
@@ -958,7 +959,9 @@
   clearBtn.addEventListener('click', () => {
     if (!activeId) return;
     const s = sess(activeId);
-    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, Date.now(), { immediate: true }));
+    const now = Date.now();
+    s.workerEvents = s.workerEvents.concat(WidgetWorkers.stopAll(s.workerEvents, now, { immediate: true }));
+    for (const w of WidgetWorkers.reduce(s.workerEvents, now)) s.hiddenWorkers.add(w.id); // rows already done can't be stopped again
     renderWorkers();
     renderMascot();
   });
@@ -970,11 +973,14 @@
     const t = terminals.get(activeId);
     return t && !t.exited ? activeId : null;
   }
-  askBtn.addEventListener('click', () => {
+  function updateAsk() { const askBtn = $('workers-ask'); askBtn.disabled = !askTarget() || sess(activeId).state.attention; } // a function declaration: update() and focusTab() may call it early
+  $('workers-ask').addEventListener('click', () => {
     const target = askTarget();
     if (!target) return toast('Focus a Claude session first');
+    if (sess(target).state.attention) return toast('Claude is waiting for your answer. Answer it first.');
     typeIntoClaude(target, ASK_CLOSE_TEXT, true);
     toast('Asked Claude to close what it no longer needs');
+    terminals.focus();
   });
 
   widget.workers.onEvents(({ id, events }) => {
@@ -998,6 +1004,7 @@
     if (!activeId) return;
     const s = sess(activeId);
     if (s.workerEvents.length) renderWorkers();
+    else updateAsk();
     if (s.turnStart !== null) renderFooter();
     if (!jobsEl.hidden) renderJobs();
   }, 1000);

@@ -173,3 +173,13 @@ test('stopAll: nothing running or garbage gives []', () => {
   assert.deepEqual(stopAll([start('a', 'agent', 1), { t: 'stop', id: 'a', ts: 2 }], 3), []);
   for (const bad of [null, undefined, 'x', 5, {}, [null, 1, {}]]) assert.deepEqual(stopAll(bad, 1), []);
 });
+
+test('visible: drops hidden ids, running or done, and tolerates no set', () => {
+  const { visible } = require('../src/workers');
+  const rows = reduce([start('a', 'agent', 1000), start('b', 'shell', 1100), { t: 'stop', id: 'b', ts: 1500 }], 2000);
+  assert.deepEqual(visible(rows, new Set(['a', 'b'])), []);
+  assert.deepEqual(visible(rows, new Set(['b'])).map((w) => w.id), ['a']);
+  assert.equal(visible(rows).length, 2);
+  assert.equal(visible(rows, null).length, 2);
+  assert.deepEqual(visible(null, new Set()), []);
+});

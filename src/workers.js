@@ -60,6 +60,12 @@
     return reduce(events, now).filter((w) => w.doneAt === null).map((w) => ({ t: 'stop', id: w.id, ts }));
   }
 
+  // Rows minus the ids the user cleared (hidden: Set). Done rows can't be stopped again, so Clear hides them by id.
+  function visible(rows, hidden) {
+    if (!Array.isArray(rows)) return [];
+    return hidden && hidden.size ? rows.filter((w) => !hidden.has(w.id)) : rows;
+  }
+
   // Claude's task list (TaskCreate/TaskUpdate or TodoWrite events) -> { done, total, current, all } or null.
   // Only the newest session's list counts (ids restart in a new session, e.g. after /clear). A finished
   // list stays up for TASKS_DONE_TTL_MS after its last change.
@@ -89,7 +95,7 @@
     return { done, total: all.length, current: active ? active.subject : null, all };
   }
 
-  const api = { reduce, stopAll, tasks, DONE_TTL_MS, TASKS_DONE_TTL_MS, SNAPSHOT_KINDS };
+  const api = { reduce, stopAll, visible, tasks, DONE_TTL_MS, TASKS_DONE_TTL_MS, SNAPSHOT_KINDS };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.WidgetWorkers = api;
 })(this);
