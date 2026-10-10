@@ -938,7 +938,8 @@ const remoteHost = createRemoteHost({
   openProject: (id, cols, rows) => { const ok = startSession(id, cols, rows); if (ok) sendProjects(); return ok; },
   write: (id, data) => sessions.write(id, data),
   resize: (id, cols, rows) => sessions.resize(id, cols, rows),
-  restart: (id, cols, rows) => sessions.restart(id, cols, rows),
+  // A remote client restarted it: clear this window's copy too (the old screen would stay in its scrollback)
+  restart: (id, cols, rows) => { send('remote:reset', { id }); sessions.restart(id, cols, rows); },
   closeSession: (id) => closeSession(id),
   log: (e) => console.log('remote control:', e.result, e.device || '')
 });
