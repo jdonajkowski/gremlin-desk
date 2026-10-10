@@ -115,10 +115,11 @@ function readJson(file, fallback) {
   }
 }
 
-function writeJson(file, data) {
+function writeJson(file, data, mode) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(data, null, 2));
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), mode ? { mode } : undefined);
+    if (mode) { try { fs.chmodSync(file, mode); } catch { /* Windows has no POSIX modes */ } } // the mode only applies to a new file
   } catch (err) {
     console.error('Failed to write', file, err);
   }
@@ -913,7 +914,7 @@ let remoteCfg = remoteConfig.normalize(readJson(remotePath, {}));
 let remoteError = '';
 function saveRemote(next) {
   remoteCfg = next;
-  writeJson(remotePath, next);
+  writeJson(remotePath, next, 0o600); // it holds the pairing secrets
 }
 
 // Starts a project's session without making it the active one (used when a remote client opens it).
