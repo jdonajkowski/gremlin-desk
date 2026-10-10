@@ -16,6 +16,10 @@ const { createBrowser } = require('./browser-window');
 const { createControl } = require('./browser-control');
 const { isLocalUrl, openTarget, prependPath } = require('./browser-url');
 const { createAux } = require('./aux-sessions');
+const remoteConfig = require('./remote-config');
+const remoteCrypto = require('./remote-crypto');
+const { createRemoteHost } = require('./remote-host');
+const { createRemoteClients } = require('./remote-clients');
 const { startElevated } = require('./admin-shell');
 const tasks = require('./tasks');
 const gitOps = require('./git-ops');
@@ -101,6 +105,7 @@ const statePath = path.join(userDir, 'window-state.json');
 const projectsPath = path.join(userDir, 'projects.json');
 const promptsPath = path.join(userDir, 'prompts.json');
 const defaultsPath = path.join(userDir, 'project-defaults.json');
+const remotePath = path.join(userDir, 'remote.json');
 
 function readJson(file, fallback) {
   try {
@@ -191,7 +196,7 @@ const sessions = createSessions({
   userDir,
   home: os.homedir(),
   isWin,
-  send,
+  send: sessionSend,
   settingsFile: writeSessionSettings,
   claudeDir,
   extraEnv: () => ({ ...claudeEnv(), ...guardEnv(), ...openEnv() }),
@@ -427,6 +432,15 @@ function send(channel, payload) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
 }
 
+// Session output also goes to attached remote clients. Aux terminals use plain send(): they stay on this computer.
+function sessionSend(channel, payload) {
+  send(channel, payload);
+  if (channel === 'pty:data') remoteHost.output(payload.id, payload.data);
+  else if (channel === 'pty:exit') remoteHost.exited(payload.id, payload.code);
+  else if (channel === 'workers:events') remoteHost.broadcast('workers', payload);
+  else if (channel === 'status:update') remoteHost.broadcast('status', payload);
+}
+
 // ---------------------------------------------------------------------------
 // Projects: subfolders of projectsRoot plus pinned extras, minus hidden ones
 // ---------------------------------------------------------------------------
@@ -483,8 +497,12 @@ function scanProjects() {
   if (scanned && !rootWatcher) watchRoot();
 }
 
+function sendProjectsLocal() {
+  send('projects:list', { list: projectList.concat(remote.list()), open: sessions.ids().concat(remote.openIds()), active: activeId, remoteHosts: remote.hosts() });
+}
 function sendProjects() {
-  send('projects:list', { list: projectList, open: sessions.ids(), active: activeId });
+  sendProjectsLocal();
+  remoteHost.projectsChanged();
 }
 
 function watchRoot() {
@@ -552,18 +570,14 @@ ipcMain.handle('projects:get', () => {
   scanProjects();
   const usable = (id) => projectList.some((p) => p.id === id && !p.missing);
   const restore = config.restoreSessions === false ? [] : (Array.isArray(state.openProjects) ? state.openProjects : []).filter(usable);
-  return { list: projectList, open: sessions.ids(), active: initialActive(), restore };
+  return { list: projectList.concat(remote.list()), open: sessions.ids().concat(remote.openIds()), active: initialActive(), restore, remoteHosts: remote.hosts() };
 });
 
 // Makes a project active, starting its session the first time. Returns false for a missing folder.
 // link: the session only joins the current project's tabs (Open in tab), so the active project stays as it is.
-ipcMain.handle('project:open', (_e, { id, cols, rows, link }) => {
-  if (!sessions.has(id)) {
-    const p = projectList.find((x) => x.id === id);
-    if (!p || p.missing || !fs.existsSync(p.path)) return false;
-    sessions.open(id, p.path, cols, rows);
-    saveOpen();
-  }
+ipcMain.handle('project:open', async (_e, { id, cols, rows, link }) => {
+  if (remote.has(id)) return remote.open(id, cols, rows); // the active project stays a local one: main's activeId drives local git polling
+  if (!startSession(id, cols, rows)) return false;
   if (!link && activeId !== id) {
     activeId = id;
     state.activeProject = id;
@@ -581,12 +595,19 @@ function closeSession(id) {
   saveOpen();
   send('session:closed', { id });
   scanProjects();
+  remoteHost.broadcast('closed', { id });
+  remoteHost.drop(id);
 }
 
-ipcMain.on('pty:input', (_e, { id, data }) => (aux.has(id) ? aux.write(id, data) : sessions.write(id, data)));
-ipcMain.on('pty:resize', (_e, { id, cols, rows }) => (aux.has(id) ? aux.resize(id, cols, rows) : sessions.resize(id, cols, rows)));
-ipcMain.on('pty:restart', (_e, { id, cols, rows }) => (aux.has(id) ? aux.restart(id, cols, rows) : sessions.restart(id, cols, rows)));
-ipcMain.on('session:close', (_e, { id }) => (aux.has(id) ? aux.close(id) : closeSession(id)));
+ipcMain.on('pty:input', (_e, { id, data }) => (remote.has(id) ? remote.write(id, data) : aux.has(id) ? aux.write(id, data) : sessions.write(id, data)));
+ipcMain.on('pty:resize', (_e, { id, cols, rows }) => (remote.has(id) ? remote.resize(id, cols, rows) : aux.has(id) ? aux.resize(id, cols, rows) : sessions.resize(id, cols, rows)));
+ipcMain.on('pty:restart', (_e, { id, cols, rows }) => {
+  if (remote.has(id)) return remote.restart(id, cols, rows);
+  if (aux.has(id)) return aux.restart(id, cols, rows);
+  remoteHost.restarted(id); // a restarted session starts a fresh screen for everyone watching it
+  sessions.restart(id, cols, rows);
+});
+ipcMain.on('session:close', (_e, { id }) => (remote.has(id) ? remote.close(id) : aux.has(id) ? aux.close(id) : closeSession(id)));
 ipcMain.handle('aux:get', () => aux.list());
 // Split view with only the Claude tab: a new terminal for the bottom zone.
 ipcMain.on('aux:newShell', (_e, projectId) => { if (projectPath(projectId)) openAux(projectId, { kind: 'shell', title: 'Terminal', zone: 1 }); });
@@ -671,6 +692,11 @@ ipcMain.handle('project:setDefaults', (_e, { id, text }) => {
 });
 
 ipcMain.on('project:menu', (_e, { id }) => {
+  if (remote.has(id)) {
+    // Phase 1: opening is a click, restart is Ctrl+Shift+R, so the menu only has Close.
+    if (remote.isOpen(id) && win) Menu.buildFromTemplate([{ label: 'Close session', click: () => remote.close(id) }]).popup({ window: win });
+    return;
+  }
   const p = projectList.find((x) => x.id === id);
   if (!p || !win) return;
   const items = [];
@@ -867,14 +893,123 @@ async function pollAllGit() {
     if (info) next[p.id] = info;
   }
   allGitBusy = false;
-  if (JSON.stringify(next) !== JSON.stringify(lastAllGit)) { lastAllGit = next; send('git:all', next); }
+  if (JSON.stringify(next) !== JSON.stringify(lastAllGit)) { lastAllGit = next; sendGitAll(); remoteHost.projectsChanged(); }
 }
 
 const statusTimer = setInterval(() => sessions.pollStatus(), 500);
 const gitTimer = setInterval(pollGit, 3000);
 const allGitTimer = setInterval(pollAllGit, 15000);
 setTimeout(pollAllGit, 4000);
-ipcMain.handle('git:all', () => lastAllGit);
+
+// ---------------------------------------------------------------------------
+// Remote sessions: this computer as a host (src/remote-host.js) and as a client of other computers (src/remote-clients.js)
+// ---------------------------------------------------------------------------
+let remoteCfg = remoteConfig.normalize(readJson(remotePath, {}));
+let remoteError = '';
+function saveRemote(next) {
+  remoteCfg = next;
+  writeJson(remotePath, next);
+}
+
+// Starts a project's session without making it the active one (used when a remote client opens it).
+function startSession(id, cols, rows) {
+  if (sessions.has(id)) return true;
+  const p = projectList.find((x) => x.id === id);
+  if (!p || p.missing || !fs.existsSync(p.path)) return false;
+  sessions.open(id, p.path, cols, rows);
+  saveOpen();
+  return true;
+}
+
+// No folder paths: a client only ever refers to projects by id.
+function remoteSnapshot() {
+  return {
+    list: projectList.filter((p) => !p.missing).map((p) => ({ id: p.id, name: p.name, folder: p.folder, initials: p.initials, worktreeOf: p.worktreeOf || null })),
+    open: sessions.ids(),
+    git: lastAllGit
+  };
+}
+
+const remoteHost = createRemoteHost({
+  getDevices: () => remoteCfg.devices,
+  onDeviceSeen: (id) => saveRemote(remoteConfig.touchDevice(remoteCfg, id, Date.now())),
+  snapshot: remoteSnapshot,
+  hasSession: (id) => sessions.has(id),
+  openProject: (id, cols, rows) => { const ok = startSession(id, cols, rows); if (ok) sendProjects(); return ok; },
+  write: (id, data) => sessions.write(id, data),
+  resize: (id, cols, rows) => sessions.resize(id, cols, rows),
+  restart: (id, cols, rows) => sessions.restart(id, cols, rows),
+  closeSession: (id) => closeSession(id),
+  log: (e) => console.log('remote control:', e.result, e.device || '')
+});
+
+const remote = createRemoteClients({
+  getHosts: () => remoteCfg.hosts,
+  send,
+  onChange: () => { sendProjectsLocal(); sendGitAll(); } // never sendProjects(): two Gremlins paired with each other would echo forever
+});
+
+function sendGitAll() {
+  send('git:all', { ...lastAllGit, ...remote.git() });
+}
+ipcMain.handle('git:all', () => ({ ...lastAllGit, ...remote.git() }));
+
+// One at a time: two overlapping runs could leave a second server listening.
+let applying = Promise.resolve();
+const applyRemoteHost = () => (applying = applying.then(applyRemoteHostNow));
+async function applyRemoteHostNow() {
+  await remoteHost.close();
+  remoteError = '';
+  if (!remoteCfg.host.enabled) return;
+  const address = remoteCfg.host.address || (remoteConfig.privateInterfaces(os.networkInterfaces())[0] || {}).address;
+  try {
+    await remoteHost.listen(address, remoteCfg.host.port);
+  } catch (err) {
+    remoteError = err.code === 'EADDRINUSE' ? `Port ${remoteCfg.host.port} is already in use` : err.code === 'EADDRNOTAVAIL' ? `${address} is not an address of this computer` : err.message;
+  }
+}
+
+function remoteState() {
+  const st = remoteHost.status();
+  return {
+    host: { enabled: remoteCfg.host.enabled, address: remoteCfg.host.address, port: remoteCfg.host.port, listening: st.listening, boundAddress: st.address, clients: st.clients, error: remoteError },
+    interfaces: remoteConfig.privateInterfaces(os.networkInterfaces()),
+    devices: remoteConfig.publicDevices(remoteCfg),
+    hosts: remote.hosts()
+  };
+}
+
+ipcMain.handle('remote:get', () => remoteState());
+ipcMain.handle('remote:setHost', async (_e, form) => {
+  const next = remoteConfig.setHost(remoteCfg, form || {});
+  if (next.error) return { error: next.error };
+  saveRemote(next.cfg);
+  await applyRemoteHost();
+  return remoteState();
+});
+ipcMain.handle('remote:pair', (_e, { name } = {}) => {
+  const made = remoteConfig.createDevice(remoteCfg, name);
+  saveRemote(made.cfg);
+  return { ...remoteState(), code: remoteCrypto.makePairingCode({ device: made.device.id, secret: made.device.secret }) };
+});
+ipcMain.handle('remote:revoke', (_e, { id } = {}) => {
+  saveRemote(remoteConfig.revokeDevice(remoteCfg, id));
+  remoteHost.disconnectDevice(id);
+  return remoteState();
+});
+ipcMain.handle('remote:addHost', (_e, form) => {
+  const res = remoteConfig.addHost(remoteCfg, form || {});
+  if (res.error) return { error: res.error };
+  saveRemote(res.cfg);
+  remote.sync();
+  return remoteState();
+});
+ipcMain.handle('remote:removeHost', (_e, { id } = {}) => {
+  saveRemote(remoteConfig.removeHost(remoteCfg, id));
+  remote.sync();
+  return remoteState();
+});
+ipcMain.on('remote:reconnect', (_e, hostId) => remote.reconnect(hostId));
 
 // ---------------------------------------------------------------------------
 // Markdown popouts: .md paths clicked in the terminal open rendered in their own window
@@ -1648,6 +1783,8 @@ if (!app.requestSingleInstanceLock()) {
     if (control) await control.start().catch((err) => console.error('gremlin-browser endpoint:', err.message));
     applyLoginItem();
     createWindow();
+    remote.sync();
+    applyRemoteHost();
     for (const ev of ['show', 'hide', 'minimize', 'restore']) win.on(ev, watchSysmon);
     win.once('ready-to-show', watchSysmon);
     createTray();
@@ -1661,6 +1798,8 @@ if (!app.requestSingleInstanceLock()) {
   app.on('will-quit', () => {
     globalShortcut.unregisterAll();
     sessions.closeAll();
+    remoteHost.close();
+    remote.stopAll();
     aux.closeAll();
     sampler.stop();
     if (control) control.stop();
