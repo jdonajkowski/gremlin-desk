@@ -107,6 +107,7 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
       if (stage === 'online') {
         let msg;
         try { msg = channel.open(line); } catch { lastError = 'The connection was corrupted.'; return s.destroy(); }
+        if (msg.t === 'closed') attached.delete(msg.id); // the session is gone: a later attach must ask the host again
         return msg.t === 'res' ? settle(msg) : onEvent(msg);
       }
       let m;
@@ -167,6 +168,8 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
     },
     isAttached: (id) => attached.has(id),
     detach(id) { attached.delete(id); notify('detach', { id }); },
+    // The host ended the session: nothing to re-attach to or detach from, so just drop the record (no network call).
+    forget(id) { attached.delete(id); },
     resize(id, cols, rows) {
       if (attached.has(id)) attached.set(id, { cols, rows });
       notify('resize', { id, cols, rows });

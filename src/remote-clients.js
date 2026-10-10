@@ -9,7 +9,7 @@ const LOST = '\r\n\x1b[90m[connection lost, reconnecting…]\x1b[0m\r\n';
 function createRemoteClients({ getHosts, createClient = createRemoteClient, send, onChange = () => {} }) {
   const entries = new Map(); // host id -> { host, client, snapshot: { list, open, git } }
 
-  function translate(hostId, msg) {
+  function translate(hostId, client, msg) {
     const id = nsId(hostId, msg.id);
     switch (msg.t) {
       case 'data': return send('pty:data', { id, data: msg.data });
@@ -22,7 +22,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
         return msg.exitCode == null ? undefined : send('pty:exit', { id, code: msg.exitCode });
       case 'resync':
       case 'restarted': return send('remote:reset', { id });
-      case 'closed': return send('session:closed', { id });
+      case 'closed': client.forget(msg.id); return send('session:closed', { id });
       case 'lost': return send('pty:data', { id, data: LOST });
       default: return undefined;
     }
@@ -39,7 +39,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
           entry.snapshot = { list: msg.list || [], open: msg.open || [], git: msg.git || {} };
           return onChange();
         }
-        translate(host.id, msg);
+        translate(host.id, entry.client, msg);
       }
     });
     entries.set(host.id, entry);

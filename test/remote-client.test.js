@@ -165,3 +165,17 @@ test('requests fail fast when offline, and stop() ends everything', async () => 
   client.connect();
   assert.equal(client.state().state, 'offline');
 });
+
+test('a closed event from the host forgets the attachment so the session can be reopened', async () => {
+  const h = await startHost();
+  const { client, events } = makeClient(h.port);
+  client.connect();
+  await until(() => client.state().state === 'online');
+  await client.attach('p1', 100, 30);
+  assert.equal(client.isAttached('p1'), true);
+  h.host.broadcast('closed', { id: 'p1' });
+  await until(() => events.some((e) => e.t === 'closed'));
+  assert.equal(client.isAttached('p1'), false);
+  client.stop();
+  await h.host.close();
+});

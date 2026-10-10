@@ -16,6 +16,7 @@ function fakeFactory() {
       attach: async (id, cols, rows) => { c.reqs.push(['attach', { id, cols, rows }]); (c.att = c.att || new Set()).add(id); },
       isAttached: (id) => !!(c.att && c.att.has(id)),
       detach: (id) => c.sent.push(['detach', { id }]),
+      forget: (id) => { if (c.att) c.att.delete(id); },
       resize: (id, cols, rows) => c.sent.push(['resize', { id, cols, rows }])
     };
     made[host.id] = c;
@@ -201,4 +202,16 @@ test('close tells the host and detaches; reconnect and stopAll reach the clients
   assert.equal(c.stopped, true);
   assert.deepEqual(t.m.hosts(), []);
   assert.equal(t.m.has('r:desk/x'), false);
+});
+
+test('a closed event forgets the attachment so open() asks the host again', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  c.onEvent({ t: 'projects', list: [{ id: 'p1', name: 'p', folder: 'p', initials: 'P' }], open: ['p1'], git: {} });
+  assert.equal(await t.m.open('r:desk/p1', 80, 24), true);
+  assert.equal(c.reqs.filter((r) => r[0] === 'open').length, 1);
+  c.onEvent({ t: 'closed', id: 'p1' });
+  assert.equal(await t.m.open('r:desk/p1', 80, 24), true);
+  assert.equal(c.reqs.filter((r) => r[0] === 'open').length, 2);
 });
