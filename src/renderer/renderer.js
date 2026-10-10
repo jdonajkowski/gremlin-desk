@@ -39,11 +39,13 @@
   // A desktop notification (shown by main.js) for a session you are not looking at: Gremlin is in the background,
   // or that session is not on screen. Whether the setting is on is checked by main.
   function notify(id, kind, reason) {
-    if (isRemote(id)) return; // phase 1: no desktop notifications for remote sessions
+    const remote = isRemote(id);
+    if (remote && cfg.notifyRemote === false) return; // "Also notify for sessions on other computers" is off
     const shownIds = activeId && terminals.has(activeId) ? currentLayout().front.filter(Boolean) : [];
     if (!WidgetNotify.shouldNotify({ enabled: true, id, windowFocused: document.hasFocus(), shownIds })) return;
     const p = projects.find((x) => x.id === id);
-    widget.notify.show({ id, ...WidgetNotify.message(kind, p && p.name, reason) });
+    const host = remote && p && p.remote ? p.remote.hostName : undefined;
+    widget.notify.show({ id, ...WidgetNotify.message(kind, p && p.name, reason, host) });
   }
   const update = (id, ev) => {
     if (isAux(id)) return;
@@ -1104,7 +1106,8 @@
     toast(on ? 'Pinned on top' : 'Unpinned');
   };
   $('btn-settings').onclick = () => widget.openConfig();
-  widget.onConfigChanged(({ alwaysOnTop, showSysmon: sm, showMascot, guardMinutes }) => {
+  widget.onConfigChanged(({ alwaysOnTop, showSysmon: sm, showMascot, guardMinutes, notifyRemote }) => {
+    if (notifyRemote !== undefined) cfg.notifyRemote = notifyRemote;
     pinBtn.classList.toggle('on', alwaysOnTop);
     if (sm !== undefined) { showSysmon = sm; sysEl.hidden = !sm; updateSide(); }
     if (showMascot !== undefined) document.body.classList.toggle('no-mascot', !showMascot);
