@@ -42,6 +42,9 @@ contextBridge.exposeInMainWorld('widget', {
     onList: on('aux:list'),
     onSelect: on('aux:select')
   },
+  view: {
+    setRemote: (on) => ipcRenderer.send('view:remote', !!on)
+  },
   remote: {
     reconnect: (hostId) => ipcRenderer.send('remote:reconnect', hostId),
     onReplay: on('remote:replay'),

@@ -140,6 +140,8 @@ let win = null;
 let tray = null;
 const mdWindows = new Map();
 let activeId = null;
+let remoteFront = false; // the tab in front is a remote session: activeId stays a local project, so project-driven actions must not use it
+const NOT_REMOTE = 'Not available on remote sessions yet';
 
 // What sessions pass to Claude Code with --settings (src/claude-launch.js). Rewritten before each
 // session starts, so it follows the user's current status line and whether Node is installed.
@@ -607,6 +609,7 @@ ipcMain.on('pty:restart', (_e, { id, cols, rows }) => {
   remoteHost.restarted(id); // a restarted session starts a fresh screen for everyone watching it
   sessions.restart(id, cols, rows);
 });
+ipcMain.on('view:remote', (_e, on) => { remoteFront = on === true; });
 ipcMain.on('session:close', (_e, { id }) => (remote.has(id) ? remote.close(id) : aux.has(id) ? aux.close(id) : closeSession(id)));
 ipcMain.handle('aux:get', () => aux.list());
 // Split view with only the Claude tab: a new terminal for the bottom zone.
@@ -614,6 +617,7 @@ ipcMain.on('aux:newShell', (_e, projectId) => { if (projectPath(projectId)) open
 
 // The run button: the project's tasks (src/tasks.js) and a new terminal.
 ipcMain.on('run:menu', () => {
+  if (remoteFront) return send('toast', NOT_REMOTE);
   const id = activeId;
   const root = projectPath(id);
   if (!root || !win) return;
@@ -643,15 +647,16 @@ ipcMain.on('run:menu', () => {
 // The shield button: admin terminals, the system change guard, snapshots and the system views.
 ipcMain.on('admin:menu', () => {
   if (!win) return;
-  const id = activeId;
+  const id = remoteFront ? null : activeId; // the admin terminals open in a local project folder
+  const noProject = !projectPath(id);
   const mode = config.guardMode || 'ask';
   const setMode = (m) => {
     setConfig({ guardMode: m });
     send('toast', m === 'off' ? 'System change guard off' : m === 'log' ? 'System changes are logged, not asked about' : 'Claude asks before system changes');
   };
   Menu.buildFromTemplate([
-    { label: isWin ? 'Admin terminal (UAC)' : 'Root shell (sudo -s)', enabled: !!projectPath(id), click: () => openAux(id, { kind: 'admin', title: 'Admin' }) },
-    ...(isWin ? [{ label: 'Claude as administrator (UAC)', enabled: !!projectPath(id), click: () => openAux(id, { kind: 'admin-claude', title: 'Admin Claude' }) }] : []),
+    { label: isWin ? 'Admin terminal (UAC)' : 'Root shell (sudo -s)', enabled: !noProject, click: () => openAux(id, { kind: 'admin', title: 'Admin' }) },
+    ...(isWin ? [{ label: 'Claude as administrator (UAC)', enabled: !noProject, click: () => openAux(id, { kind: 'admin-claude', title: 'Admin Claude' }) }] : []),
     { type: 'separator' },
     { label: 'Create snapshot…', click: () => workbench.open('system') },
     { label: 'System changes and undo…', click: () => workbench.open('changes') },
@@ -1239,7 +1244,7 @@ ipcMain.on('md:edit', (ev) => { const f = mdFileOf(ev.sender); if (f) openEditor
 ipcMain.on('md:vscode', (ev) => { const f = mdFileOf(ev.sender); if (f) openInVSCode(f); });
 
 // Built-in browser (src/browser-window.js): mockups, local dev servers, screenshots.
-const browser = createBrowser({ icon: path.join(__dirname, '..', 'assets', 'icon.png'), projectDir: () => projectPath(activeId), isWin });
+const browser = createBrowser({ icon: path.join(__dirname, '..', 'assets', 'icon.png'), projectDir: () => (remoteFront ? null : projectPath(activeId)), isWin });
 browser.handle(ipcMain);
 ipcMain.on('browser:open', () => browser.open());
 // Sessions started after this listens get GREMLIN_BROWSER(_TOKEN) for widget-browser (see openEnv).
@@ -1635,6 +1640,7 @@ function ccusageCommand() {
 
 // Pastes text into the active project's Claude prompt (bracketed paste, not sent), for the user to review.
 function sendToSession(text) {
+  if (remoteFront) return { error: NOT_REMOTE };
   if (!activeId || !sessions.has(activeId)) return { error: 'Open a project session in Gremlin first' };
   sessions.write(activeId, `\x1b[200~${text}\x1b[201~`);
   send('aux:select', { id: activeId, projectId: activeId });
@@ -1654,7 +1660,7 @@ const workbench = setupWorkbench({
   onSample: (fn) => sampleListeners.push(fn),
   config: () => config,
   setConfig,
-  activeProject: () => activeId,
+  activeProject: () => (remoteFront ? null : activeId),
   projectInfo: (id) => projectList.find((p) => p.id === id) || null,
   projectPath,
   projectsRoot,

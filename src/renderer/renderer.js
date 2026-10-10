@@ -664,6 +664,7 @@
   // Everything that shows the active session: title, progress strip, workers, footer.
   function renderActive() {
     renderTitle();
+    widget.view.setRemote(isRemote(activeId));
     if (isRemote(activeId)) filesPane.setProject(null, 'Files are not available on remote computers yet.');
     else filesPane.setProject(activeId);
     renderTabs();
