@@ -52,6 +52,14 @@
       .sort((a, b) => a.startedAt - b.startedAt);
   }
 
+  // Synthetic stop events for every worker still running, to hide the rows of a session that ended or the user cleared.
+  // immediate: back-dated so the rows are past their DONE_TTL_MS and vanish at once. Stops nothing for real.
+  function stopAll(events, now, { immediate = false } = {}) {
+    if (!Array.isArray(events) || typeof now !== 'number') return [];
+    const ts = immediate ? now - DONE_TTL_MS - 1 : now;
+    return reduce(events, now).filter((w) => w.doneAt === null).map((w) => ({ t: 'stop', id: w.id, ts }));
+  }
+
   // Claude's task list (TaskCreate/TaskUpdate or TodoWrite events) -> { done, total, current, all } or null.
   // Only the newest session's list counts (ids restart in a new session, e.g. after /clear). A finished
   // list stays up for TASKS_DONE_TTL_MS after its last change.
@@ -81,7 +89,7 @@
     return { done, total: all.length, current: active ? active.subject : null, all };
   }
 
-  const api = { reduce, tasks, DONE_TTL_MS, TASKS_DONE_TTL_MS, SNAPSHOT_KINDS };
+  const api = { reduce, stopAll, tasks, DONE_TTL_MS, TASKS_DONE_TTL_MS, SNAPSHOT_KINDS };
   if (typeof module === 'object' && module.exports) module.exports = api;
   else root.WidgetWorkers = api;
 })(this);

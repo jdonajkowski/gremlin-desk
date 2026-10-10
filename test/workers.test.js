@@ -142,3 +142,34 @@ test("another session's listed rows end when the newest session finishes a turn"
   assert.equal(reduce(ev, 3000)[0].doneAt, 3000);
   assert.equal(reduce(ev.slice(0, 1), 2500)[0].doneAt, null);
 });
+
+test('stopAll: stops running workers only, across sessions', () => {
+  const { stopAll } = require('../src/workers');
+  const ev = [
+    { ...start('a', 'agent', 1000), sid: 's1' },
+    { ...start('b', 'shell', 1100), sid: 's2' },
+    start('c', 'shell', 1200),
+    { t: 'stop', id: 'c', ts: 1500 }
+  ];
+  assert.deepEqual(stopAll(ev, 2000), [{ t: 'stop', id: 'a', ts: 2000 }, { t: 'stop', id: 'b', ts: 2000 }]);
+});
+
+test('stopAll: non-immediate keeps rows for the TTL, immediate hides at once, and a later duplicate start stays hidden', () => {
+  const { stopAll } = require('../src/workers');
+  const ev = [start('a', 'agent', 1000), start('b', 'shell', 1100)];
+  const soft = ev.concat(stopAll(ev, 2000));
+  assert.equal(reduce(soft, 2000).length, 2);
+  assert.ok(reduce(soft, 2000).every((w) => w.doneAt === 2000));
+  assert.equal(reduce(soft, 2000 + DONE_TTL_MS).length, 2);
+  assert.equal(reduce(soft, 2000 + DONE_TTL_MS + 1).length, 0);
+  const hard = ev.concat(stopAll(ev, 2000, { immediate: true }));
+  assert.equal(reduce(hard, 2000).length, 0);
+  assert.equal(reduce(hard.concat(start('a', 'agent', 3000)), 3000).length, 0);
+});
+
+test('stopAll: nothing running or garbage gives []', () => {
+  const { stopAll } = require('../src/workers');
+  assert.deepEqual(stopAll([], 1), []);
+  assert.deepEqual(stopAll([start('a', 'agent', 1), { t: 'stop', id: 'a', ts: 2 }], 3), []);
+  for (const bad of [null, undefined, 'x', 5, {}, [null, 1, {}]]) assert.deepEqual(stopAll(bad, 1), []);
+});
