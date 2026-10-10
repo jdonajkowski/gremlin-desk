@@ -760,3 +760,14 @@ body.rail-collapsed .proj .pgit { display: none; }
 .tab.drop-before { box-shadow: inset 2px 0 0 var(--accent); }
 .sw-meta { flex: none; direction: ltr; unicode-bidi: isolate; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .sw-path { unicode-bidi: plaintext; }
+
+/* A paired computer in the project rail: header row, then its projects */
+.proj.rhead { cursor: pointer; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.8; margin-top: 6px; }
+.proj.rhead:hover { opacity: 1; }
+.pdot.host-online { border: 0; background: #57ab5a; }
+.pdot.host-connecting { border: 0; background: #d6a642; animation: dot-pulse 1.2s ease-in-out infinite; }
+.pdot.host-offline, .pdot.host-error { border: 1.5px solid #8a8580; background: transparent; }
+.pdot.host-error { border-color: #e5534b; }
+.proj.offline { opacity: 0.45; }
+body.rail-collapsed .proj.rhead .pname { display: none; }
+body.rail-collapsed .proj.rhead { margin-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.08); border-radius: 0; }

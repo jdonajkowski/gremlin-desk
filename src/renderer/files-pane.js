@@ -18,6 +18,7 @@
     let badges = {};
     let renderSeq = 0;
     let query = '';
+    let notice = '';
     let regex = false;
     let caseSensitive = false;
 
@@ -115,7 +116,7 @@
         await walk('', 0);
       }
       if (seq !== renderSeq) return; // a newer render started meanwhile
-      swapIn(frag, projectId ? 'Empty folder' : 'No project open');
+      swapIn(frag, projectId ? 'Empty folder' : notice || 'No project open');
     }
 
     // --- Search ------------------------------------------------------------------------------------
@@ -133,7 +134,7 @@
       const seq = ++renderSeq;
       const q = query;
       const frag = document.createDocumentFragment();
-      if (!projectId) return swapIn(frag, 'No project open');
+      if (!projectId) return swapIn(frag, notice || 'No project open');
       await load(''); // sets the header to this project
       if (seq !== renderSeq) return;
       const loading = document.createElement('div');
@@ -243,9 +244,11 @@
       return render();
     }
 
-    function setProject(id) {
-      if (id === projectId) return;
+    // notice: shown instead of "No project open" when there is no project to list (e.g. a remote session).
+    function setProject(id, text = '') {
+      if (id === projectId && text === notice) return;
       projectId = id;
+      notice = text;
       badges = {};
       listEl.scrollTop = 0;
       refresh();

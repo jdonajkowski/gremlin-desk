@@ -32,10 +32,14 @@
   let activeId = null;
 
   const isAux = (id) => typeof id === 'string' && id.startsWith('aux:');
+  const isRemote = (id) => typeof id === 'string' && id.startsWith('r:');
+  let remoteHosts = [];
+  const replaying = new Set(); // remote terminals still parsing a replay: old progress sequences must not count as news
 
   // A desktop notification (shown by main.js) for a session you are not looking at: Gremlin is in the background,
   // or that session is not on screen. Whether the setting is on is checked by main.
   function notify(id, kind, reason) {
+    if (isRemote(id)) return; // phase 1: no desktop notifications for remote sessions
     const shownIds = activeId && terminals.has(activeId) ? currentLayout().front.filter(Boolean) : [];
     if (!WidgetNotify.shouldNotify({ enabled: true, id, windowFocused: document.hasFocus(), shownIds })) return;
     const p = projects.find((x) => x.id === id);
@@ -73,6 +77,21 @@
   }
 
   // --- Terminals ----------------------------------------------------------
+  function applyProgress(id, state, value) {
+    if (isAux(id)) return;
+    const s = sess(id);
+    s.progress = { state, value };
+    // A new turn: forget tool calls a previous one left without an end (e.g. interrupted).
+    if (state >= 1 && state <= 4 && s.turnStart === null) s.tools = new Map();
+    const ended = state === 0 && s.turnStart !== null;
+    trackTurn(s, state);
+    update(id, { t: 'progress', state });
+    if (ended) notify(id, 'finished');
+    // Claude may have added or removed files during the turn.
+    if (ended && id === activeId) filesPane.refresh();
+    if (id === activeId) { renderProgress(); renderFooter(); }
+    renderTaskbar();
+  }
   const terminals = WidgetTerminals.createTerminals({
     widget,
     cfg,
@@ -81,21 +100,8 @@
     onFocus: (id) => focusTab(id),
     // Only real typing answers a question; focus/mouse reports and query replies also come through here.
     onInput: (id, data) => { if (SS.isTyping(data)) update(id, { t: 'input' }); },
-    onProgress: (id, state, value) => {
-      if (isAux(id)) return;
-      const s = sess(id);
-      s.progress = { state, value };
-      // A new turn: forget tool calls a previous one left without an end (e.g. interrupted).
-      if (state >= 1 && state <= 4 && s.turnStart === null) s.tools = new Map();
-      const ended = state === 0 && s.turnStart !== null;
-      trackTurn(s, state);
-      update(id, { t: 'progress', state });
-      if (ended) notify(id, 'finished');
-      // Claude may have added or removed files during the turn.
-      if (ended && id === activeId) filesPane.refresh();
-      if (id === activeId) { renderProgress(); renderFooter(); }
-      renderTaskbar();
-    }
+    isMuted: (id) => replaying.has(id),
+    onProgress: (id, state, value) => { if (!replaying.has(id)) applyProgress(id, state, value); }
   });
   terminals.setOnRestart((id) => {
     if (isAux(id)) return renderTabs();
@@ -118,12 +124,27 @@
   });
   widget.pty.onRestartActive(() => activeId && terminals.restart(activeId));
 
+  // Remote sessions: the host sends a replay of the screen on attach, and tells us about progress even while nobody is
+  // attached (a terminal that exists parses progress itself, so the host's copy is only used when there is none).
+  widget.remote.onReplay(({ id, data, progress }) => {
+    replaying.add(id);
+    terminals.write(id, data, () => {
+      replaying.delete(id);
+      if (progress) applyProgress(id, progress.state, progress.value || 0); // where the turn is now, not what the replayed history says
+    });
+  });
+  widget.remote.onReset(({ id }) => terminals.reset(id));
+  widget.remote.onSessionEvent(({ id, ev }) => {
+    if (ev && ev.t === 'progress' && !terminals.has(id)) applyProgress(id, ev.state, ev.value || 0);
+  });
+
   // --- Rail ---------------------------------------------------------------
   const rail = WidgetRail.createRail({
     el: $('rail'),
     onOpen: (id) => activate(id),
     onMenu: (id) => widget.projects.menu(id),
-    onAdd: () => widget.projects.addMenu()
+    onAdd: () => widget.projects.addMenu(),
+    onHeader: (hostId) => widget.remote.reconnect(hostId)
   });
   rail.setCollapsed(cfg.rail.collapsed, cfg.rail.width);
   widget.rail.onState(({ collapsed, width }) => rail.setCollapsed(collapsed, width));
@@ -258,10 +279,11 @@
   widget.status.gitAll().then((all) => { gitAll = all || {}; renderRail(); });
 
   function renderRail() {
-    rail.render(projects, { active: activeId, open: openIds, dot: (id) => SS.dot(sess(id).state), git: (id) => WidgetGitBadge.badge(gitAll[id]) });
+    rail.render(WidgetRail.withHeaders(projects, remoteHosts), { active: activeId, open: openIds, dot: (id) => SS.dot(sess(id).state), git: (id) => WidgetGitBadge.badge(gitAll[id]) });
   }
 
-  widget.projects.onList(({ list, open }) => {
+  widget.projects.onList(({ list, open, remoteHosts: hosts }) => {
+    remoteHosts = hosts || [];
     projects = list;
     openIds = new Set(open);
     renderRail();
@@ -306,7 +328,7 @@
     const ok = await widget.projects.open(id, t.term.cols, t.term.rows);
     if (!ok) {
       terminals.destroy(id);
-      toast(`Folder missing: ${p.path}`, 2500);
+      toast(isRemote(id) ? 'Could not open that session on the other computer' : `Folder missing: ${p.path}`, 2500);
       if (activeId && terminals.has(activeId)) terminals.show(activeId);
       return;
     }
@@ -346,7 +368,9 @@
       const kept = st ? TL.of(tabLinks, host).filter((id) => st.split && st.zone[id] === 1) : TL.of(savedLinks.bottom, host);
       if (kept.length) bottom[host] = kept;
     }
-    try { localStorage.setItem('tabLinks', TL.stringify(tabLinks, bottom)); } catch { /* storage off */ }
+    // Remote sessions are reconnected by hand each run: never stored, as host or as linked tab.
+    const stored = (m) => { const out = {}; for (const [host, ids] of Object.entries(m)) { const keep = ids.filter((id) => !isRemote(id)); if (!isRemote(host) && keep.length) out[host] = keep; } return out; };
+    try { localStorage.setItem('tabLinks', TL.stringify(stored(tabLinks), stored(bottom))); } catch { /* storage off */ }
   }
   // Your own tab order, pins and names (Right-click a tab; drag a tab onto another to reorder).
   const TP = WidgetTabPrefs;
@@ -455,6 +479,9 @@
     const label = document.createElement('span');
     label.className = 'tlabel';
     label.textContent = (t.kind.startsWith('admin') ? '⛨ ' : '') + (TP.isPinned(tabPrefs, t.id) ? '▪ ' : '') + TP.nameOf(tabPrefs, t.id, t.title);
+    // A remote session's tab says which computer it runs on.
+    const remoteHost = isRemote(t.id) ? (projects.find((x) => x.id === t.id) || {}).remote : null;
+    if (remoteHost) { label.textContent += ` · ${remoteHost.hostName}`; el.title += `\nOn ${remoteHost.hostName}`; }
     // A project's Claude session (the first tab, or one opened in a tab) shows its state like the sidebar does.
     if (t.kind === 'claude') {
       const dot = document.createElement('span');
@@ -637,7 +664,8 @@
   // Everything that shows the active session: title, progress strip, workers, footer.
   function renderActive() {
     renderTitle();
-    filesPane.setProject(activeId);
+    if (isRemote(activeId)) filesPane.setProject(null, 'Files are not available on remote computers yet.');
+    else filesPane.setProject(activeId);
     renderTabs();
     const t = activeId && terminals.get(activeId);
     document.body.classList.toggle('exited', !t || t.exited);
@@ -1051,7 +1079,7 @@
   const loadSpend = () => widget.usage.byProject().then((x) => { spend = x || {}; switcher.refresh(); });
   const switcher = WidgetSwitcher.createSwitcher({
     el: $('switcher'),
-    items: () => projects.map((p) => ({ id: p.id, name: p.name, path: p.path, open: openIds.has(p.id), active: p.id === activeId, dot: SS.dot(sess(p.id).state), git: [WidgetGitBadge.badge(gitAll[p.id]).long, spend[p.id]].filter(Boolean).join('  ') })),
+    items: () => projects.map((p) => ({ id: p.id, name: p.name, path: p.remote ? p.remote.hostName : p.path, open: openIds.has(p.id), active: p.id === activeId, dot: SS.dot(sess(p.id).state), git: [WidgetGitBadge.badge(gitAll[p.id]).long, spend[p.id]].filter(Boolean).join('  ') })),
     pick: (id, { inTab }) => (inTab ? linkProject(id) : activate(id)),
     canTab: (id) => !!activeId && id !== activeId,
     onClose: () => terminals.focus()
@@ -1309,6 +1337,7 @@
   // --- Launch: open the last active project; every other one stays idle until clicked ---
   const initial = await widget.projects.get();
   projects = initial.list;
+  remoteHosts = initial.remoteHosts || [];
   openIds = new Set(initial.open);
   renderRail();
   applyAux(await widget.aux.get());

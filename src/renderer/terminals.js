@@ -2,7 +2,7 @@
 // One xterm per session, each in its own <div> inside a zone's host (#terminal, or #terminal-b in split view).
 // Hidden terminals keep receiving output, so switching back shows complete scrollback. Loaded as a plain script (window.WidgetTerminals).
 (function (root) {
-  function createTerminals({ widget, cfg, host, onProgress, onInput, toast, onFocus = () => {} }) {
+  function createTerminals({ widget, cfg, host, onProgress, onInput, toast, onFocus = () => {}, isMuted = () => false }) {
     const terms = new Map();
     let activeId = null;
     let fontSize = cfg.fontSize;
@@ -53,6 +53,7 @@
       });
 
       term.onData((data) => {
+        if (isMuted(id)) return; // xterm answers terminal queries found in a replay; those answers are not typing
         if (t.exited) {
           if (data === '\r') restart(id);
           return;
@@ -276,7 +277,8 @@
       fitActive,
       has: (id) => terms.has(id),
       get: (id) => terms.get(id),
-      write: (id, data) => { const t = terms.get(id); if (t) t.term.write(data); },
+      write: (id, data, cb) => { const t = terms.get(id); if (t) t.term.write(data, cb); else if (cb) cb(); },
+      reset: (id) => { const t = terms.get(id); if (t) { t.exited = false; t.term.reset(); } },
       focus: () => { const t = terms.get(activeId); if (t) t.term.focus(); },
       setOnRestart: (fn) => { onRestart = fn; }
     };
