@@ -1,7 +1,7 @@
 {
   "name": "gremlin-desk",
   "productName": "Gremlin",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "Gremlin: a desktop workspace for Claude Code sessions, with terminals, a browser, git and system tools.",
   "author": {
     "name": "Jacob Donajkowski",

@@ -23,6 +23,8 @@
     setStatus('');
     if (name === 'agents') loadAgents();
     if (name === 'setup') loadSetup();
+    $('btn-save').hidden = name === 'remote';
+    if (name === 'remote') loadRemote();
   }
   for (const b of document.querySelectorAll('#tabs button')) b.onclick = () => showTab(b.dataset.tab);
   host.onTab(showTab);
@@ -236,14 +238,77 @@
     setStatus('Saved. New Claude sessions pick it up; running ones on their next start.', 'ok');
   }
 
+  // --- Remote: this computer as a host, and the computers it connects to ------------
+  const when = (ms) => (ms ? new Date(ms).toLocaleString() : 'never');
+  const row = (text, detail, buttons) => {
+    const r = el('div', 'check-row');
+    const body = el('div', 'body');
+    body.append(el('div', '', text), el('div', 'detail', detail || ''));
+    r.appendChild(body);
+    for (const b of buttons) { const btn = el('button', '', b.label); btn.type = 'button'; btn.onclick = b.run; r.appendChild(btn); }
+    return r;
+  };
+
+  function showRemote(s) {
+    const h = s.host;
+    $('rm-enabled').checked = h.enabled;
+    $('rm-port').value = h.port;
+    const sel = $('rm-address');
+    sel.replaceChildren(...[{ name: 'Automatic (first private address)', address: '' }, ...s.interfaces].map((i) => {
+      const o = el('option', '', i.address ? `${i.name} · ${i.address}` : i.name);
+      o.value = i.address;
+      return o;
+    }));
+    sel.value = h.address;
+    $('rm-status').textContent = h.error ? `Not listening: ${h.error}` : h.listening ? `Listening on ${h.boundAddress}:${h.port}. ${h.clients} connected.` : h.enabled ? 'Not listening.' : 'Off.';
+    $('rm-status').className = h.error ? 'hint-block error' : 'hint-block';
+    $('rm-where').textContent = h.listening ? `address ${h.boundAddress} and port ${h.port}` : 'this computer\'s address and port';
+    $('rm-devices').replaceChildren(...(s.devices.length ? s.devices : []).map((d) => row(d.name, `Last connected: ${when(d.lastSeen)}`, [{ label: 'Revoke', run: async () => showRemote(await host.remote.revoke(d.id)) }])));
+    $('rm-hosts').replaceChildren(...(s.hosts.length ? s.hosts : []).map((x) => row(x.name, `${x.address}:${x.port} · ${{ online: 'Connected', connecting: 'Connecting…', offline: 'Not connected', error: 'Cannot connect' }[x.state] || x.state}${x.error ? ` — ${x.error}` : ''}`, [
+      { label: 'Try again', run: () => { host.remote.reconnect(x.id); setTimeout(loadRemote, 600); } },
+      { label: 'Remove', run: async () => showRemote(await host.remote.removeHost(x.id)) }
+    ])));
+  }
+
+  async function loadRemote() { showRemote(await host.remote.get()); }
+
+  async function applyRemoteHost() {
+    const res = await host.remote.setHost({ enabled: $('rm-enabled').checked, address: $('rm-address').value, port: Number($('rm-port').value) });
+    if (res.error) { setStatus(res.error, 'error'); return loadRemote(); }
+    setStatus('');
+    showRemote(res);
+  }
+  for (const id of ['rm-enabled', 'rm-address', 'rm-port']) $(id).onchange = applyRemoteHost;
+
+  $('rm-pair').onclick = async () => {
+    const res = await host.remote.pair($('rm-pair-name').value);
+    $('rm-pair-name').value = '';
+    showRemote(res);
+    $('rm-code').value = res.code;
+    $('rm-code-box').hidden = false;
+    $('rm-code').select();
+  };
+  $('rm-copy').onclick = async () => {
+    $('rm-code').select();
+    try { await navigator.clipboard.writeText($('rm-code').value); setStatus('Copied', 'ok'); } catch { setStatus('Press Ctrl+C to copy the selected code', ''); }
+  };
+  $('rm-add').onclick = async () => {
+    const res = await host.remote.addHost({ name: $('rm-add-name').value, address: $('rm-add-address').value, port: $('rm-add-port').value, code: $('rm-add-code').value });
+    if (res.error) return setStatus(res.error, 'error');
+    for (const id of ['rm-add-name', 'rm-add-address', 'rm-add-port', 'rm-add-code']) $(id).value = '';
+    setStatus('Added. It connects now.', 'ok');
+    showRemote(res);
+    setTimeout(loadRemote, 800);
+  };
+
   // --- Footer ----------------------------------------------------------------
-  const save = () => (tab === 'agents' ? saveAgents() : saveForm());
+  const save = () => { if (tab === 'remote') return; return tab === 'agents' ? saveAgents() : saveForm(); };
   $('btn-save').onclick = save;
   $('btn-json').onclick = () => host.openJson();
   $('btn-restart').onclick = () => host.restart();
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
-    if (e.key === 'Escape' && tab !== 'agents') window.close();
+    if (e.key === 'Escape' && tab !== 'agents' && tab !== 'remote') window.close();
   });
 
   fill(values);

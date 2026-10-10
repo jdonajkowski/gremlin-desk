@@ -2,7 +2,7 @@
 // One xterm per session, each in its own <div> inside a zone's host (#terminal, or #terminal-b in split view).
 // Hidden terminals keep receiving output, so switching back shows complete scrollback. Loaded as a plain script (window.WidgetTerminals).
 (function (root) {
-  function createTerminals({ widget, cfg, host, onProgress, onInput, toast, onFocus = () => {} }) {
+  function createTerminals({ widget, cfg, host, onProgress, onInput, toast, onFocus = () => {}, isMuted = () => false }) {
     const terms = new Map();
     let activeId = null;
     let fontSize = cfg.fontSize;
@@ -26,6 +26,7 @@
           allowNonHttpProtocols: true,
           activate: (_e, uri) => {
             if (/^https?:\/\//i.test(uri)) return widget.openExternal(uri);
+            if (id.startsWith('r:')) return; // a remote terminal's output must not open files from this computer's disk
             // A scheme has 2+ letters, so a drive letter (C:\…) counts as a plain path.
             const target = uri.split(/[?#]/)[0].replace(/(?::\d+)+$/, '');
             const local = /^file:/i.test(target) || !/^[a-z][\w+.-]+:/i.test(target);
@@ -53,6 +54,7 @@
       });
 
       term.onData((data) => {
+        if (isMuted(id)) return; // xterm answers terminal queries found in a replay; those answers are not typing
         if (t.exited) {
           if (data === '\r') restart(id);
           return;
@@ -66,6 +68,7 @@
       // Wrapped rows are joined so a long path that spans rows is still one link.
       term.registerLinkProvider({
         provideLinks(y, callback) {
+          if (id.startsWith('r:')) return callback(undefined); // the paths in a remote screen are not this computer's
           const buf = term.buffer.active;
           let first = y - 1;
           while (first > 0 && buf.getLine(first) && buf.getLine(first).isWrapped) first--;
@@ -276,7 +279,8 @@
       fitActive,
       has: (id) => terms.has(id),
       get: (id) => terms.get(id),
-      write: (id, data) => { const t = terms.get(id); if (t) t.term.write(data); },
+      write: (id, data, cb) => { const t = terms.get(id); if (t) t.term.write(data, cb); else if (cb) cb(); },
+      reset: (id) => { const t = terms.get(id); if (t) { t.exited = false; t.term.reset(); } },
       focus: () => { const t = terms.get(activeId); if (t) t.term.focus(); },
       setOnRestart: (fn) => { onRestart = fn; }
     };

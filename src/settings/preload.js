@@ -16,5 +16,14 @@ contextBridge.exposeInMainWorld('settingsHost', {
   agents: {
     get: () => ipcRenderer.invoke('agents:get'),
     save: (text) => ipcRenderer.invoke('agents:save', text)
+  },
+  remote: {
+    get: () => ipcRenderer.invoke('remote:get'),
+    setHost: (form) => ipcRenderer.invoke('remote:setHost', form),
+    pair: (name) => ipcRenderer.invoke('remote:pair', { name }),
+    revoke: (id) => ipcRenderer.invoke('remote:revoke', { id }),
+    addHost: (form) => ipcRenderer.invoke('remote:addHost', form),
+    removeHost: (id) => ipcRenderer.invoke('remote:removeHost', { id }),
+    reconnect: (id) => ipcRenderer.send('remote:reconnect', id)
   }
 });

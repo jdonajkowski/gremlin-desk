@@ -14,6 +14,7 @@
     <button data-tab="appearance">Appearance</button>
     <button data-tab="agents">Global instructions</button>
     <button data-tab="setup">Setup</button>
+    <button data-tab="remote">Remote</button>
   </nav>
 
   <form id="form" autocomplete="off">
@@ -86,6 +87,28 @@
     <p class="intro">Instructions Claude follows in <b>every</b> project. Saved to <code id="agents-path"></code>;
       <span id="agents-link"></span></p>
     <div id="agents-editor"></div>
+  </section>
+
+  <section id="remote" data-tab="remote">
+    <p class="intro">Attach to Claude sessions on another computer on your network, or let another computer attach to this one.</p>
+
+    <h2>This computer (host)</h2>
+    <p class="hint-block"><b>Anyone holding a pairing code can type into your sessions as you</b>, which is the same as having a shell on this computer. Pair only your own devices, and revoke a device you no longer use. Traffic is encrypted. Windows may ask to allow Gremlin through the firewall the first time.</p>
+    <label class="check"><input type="checkbox" id="rm-enabled"> Allow other computers to attach to my sessions</label>
+    <label>Network address<select id="rm-address"></select></label>
+    <label>Port<input id="rm-port" type="number" min="1024" max="65535"></label>
+    <p class="hint-block" id="rm-status"></p>
+    <p class="row"><input id="rm-pair-name" placeholder="Name for the new device, e.g. Laptop"><button type="button" id="rm-pair">Pair a new device</button></p>
+    <div id="rm-code-box" hidden>
+      <p class="hint-block">On the other computer: Settings → Remote → Add a computer. Enter <b id="rm-where"></b> and this code. It is shown once.</p>
+      <p class="row"><input id="rm-code" readonly><button type="button" id="rm-copy">Copy</button></p>
+    </div>
+    <div id="rm-devices"></div>
+
+    <h2>Other computers</h2>
+    <div id="rm-hosts"></div>
+    <p class="row"><input id="rm-add-name" placeholder="Name, e.g. Desk PC"><input id="rm-add-address" placeholder="Address, e.g. 192.168.1.20"><input id="rm-add-port" type="number" placeholder="Port (47731)"></p>
+    <p class="row"><input id="rm-add-code" placeholder="Pairing code (gremlin1.…)"><button type="button" id="rm-add">Add a computer</button></p>
   </section>
 
   <footer>
