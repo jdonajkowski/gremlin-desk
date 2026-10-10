@@ -89,6 +89,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   // Answer "no", then close our side for good (a peer that keeps its half open must not hold the socket).
   function sayNo(sock) {
+    sock.removeAllListeners('data'); // this connection's handshake is over: nothing it sends may count again
     sockets.add(sock);
     sock.on('error', () => {});
     sock.on('close', () => sockets.delete(sock));
@@ -158,7 +159,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       handle(c, msg).catch(() => sock.destroy());
     }
 
-    sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel) noteFailure(addr); sock.destroy(); } });
+    sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel && !finished) noteFailure(addr); sock.destroy(); } });
     sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); if (!clients.size) lastProjects = ''; });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }

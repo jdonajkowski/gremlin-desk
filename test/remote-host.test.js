@@ -61,6 +61,8 @@ function connect(port, { dev = DEV, secret = SECRET } = {}) {
   });
 }
 
+const until = async (fn, ms = 2000) => { const end = Date.now() + ms; while (Date.now() < end) { if (fn()) return; await new Promise((r) => setTimeout(r, 10)); } throw new Error('timed out'); };
+
 function setup(over = {}) {
   const calls = [];
   const open = new Set(['p1']);
@@ -145,7 +147,8 @@ function rawPeer(port) {
 }
 
 test('a locked address never takes pending slots: the cap is never hit, every attempt still gets no', async () => {
-  const s = await started({ now: () => 1000 });
+  let t = 1000;
+  const s = await started({ now: () => t });
   for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
   const peers = [];
   for (let i = 0; i < 20; i++) { // more than the 16 pending slots, held open from the client side
@@ -153,7 +156,28 @@ test('a locked address never takes pending slots: the cap is never hit, every at
     assert.equal(p.line, JSON.stringify({ t: 'no' }), 'attempt ' + i + ' answered with no, not dropped');
     peers.push(p);
   }
+  t += 61000;
+  const ok = await connect(s.port);
+  assert.equal(ok.rejected, undefined, 'after the lock ends a correct client gets in (no slots were leaked)');
+  await until(() => s.host.status().clients === 1);
+  ok.close();
   for (const p of peers) p.sock.destroy();
+  await s.host.close();
+});
+
+test('one refused connection records one failure, even if it also sends an oversized line', async () => {
+  const s = await started({ now: () => 1000 });
+  for (let i = 0; i < 3; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
+  const p = await new Promise((res) => {
+    const sock = net.connect({ host: '127.0.0.1', port: s.port, allowHalfOpen: true });
+    sock.on('error', () => {});
+    sock.resume();
+    sock.on('connect', () => sock.write('not json\n' + 'x'.repeat(C.MAX_PRE_AUTH_LINE * 2)));
+    sock.on('end', () => { sock.destroy(); res(); });
+  });
+  const ok = await connect(s.port); // 4 failures only: not locked
+  assert.equal(ok.rejected, undefined);
+  ok.close();
   await s.host.close();
 });
 
