@@ -19,6 +19,7 @@ function connect(port, { dev = DEV, secret = SECRET } = {}) {
     let hostNonce;
     const clientNonce = C.newNonce();
     let closed = false;
+    let settled = false;
     const c = {
       sock,
       get closed() { return closed; },
@@ -43,8 +44,10 @@ function connect(port, { dev = DEV, secret = SECRET } = {}) {
           const k = C.deriveKeys(secret, hostNonce, clientNonce);
           channel = C.createChannel(k.c2s, k.s2c);
           reader.setMax(C.MAX_LINE);
+          settled = true;
           resolve(c);
         } else if (m.t === 'no') {
+          settled = true;
           resolve({ rejected: true, closed: () => closed, sock });
         }
         return;
@@ -52,7 +55,7 @@ function connect(port, { dev = DEV, secret = SECRET } = {}) {
       pushMsg(channel.open(line));
     }, C.MAX_PRE_AUTH_LINE);
     sock.on('data', (d) => { try { reader.feed(d); } catch (e) { sock.destroy(); } });
-    sock.on('close', () => { closed = true; });
+    sock.on('close', () => { closed = true; if (!settled) reject(new Error('socket closed before the handshake finished')); });
     sock.on('error', () => {});
     setTimeout(() => reject(new Error('handshake timeout')), 3000).unref();
   });
@@ -115,7 +118,7 @@ test('five failed handshakes lock the address out; a good one is refused until t
   let t = 1000;
   const s = await started({ now: () => t });
   for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
-  await assert.rejects(connect(s.port), /timeout|closed/i, 'locked out: dropped silently');
+  await assert.rejects(connect(s.port), /closed/, 'locked out: dropped silently');
   t += 61000;
   const ok = await connect(s.port);
   assert.equal(ok.rejected, undefined);
@@ -167,9 +170,10 @@ test('attach returns the replay buffer, then live output only to attached client
   assert.deepEqual(s.calls.filter((x) => x[0] === 'resize'), [['resize', 'p1', 100, 30]]);
   s.host.output('p1', '!');
   assert.deepEqual(await a.until((m) => m.t === 'data'), { t: 'data', id: 'p1', data: '!' });
-  await b.request('detach', { id: 'p1' }); // b never attached: still fine
+  b.send({ t: 'detach', id: 'p1', rid: 99 }); // b never attached: still fine
+  assert.equal((await b.next()).t, 'res', 'b got no data frame before the reply');
   s.host.broadcast('workers', { id: 'p1', events: [1] });
-  assert.deepEqual((await b.until((m) => m.t === 'workers')).events, [1]);
+  assert.deepEqual((await b.next()).events, [1], 'b got no data frame before the broadcast');
   a.close(); b.close();
   await s.host.close();
 });
@@ -198,7 +202,7 @@ test('output for a session that no longer exists is ignored (late data from a ki
   const s = await started();
   const a = await connect(s.port);
   await a.next();
-  s.host.output('gone', 'stale');
+  s.host.output('gone', 'stale\x1b]9;4;3\x07');
   s.host.drop('gone');
   s.host.broadcast('workers', { id: 'x', events: [] });
   assert.equal((await a.next()).t, 'workers', 'nothing was sent for the dead session');
@@ -232,13 +236,19 @@ test('only 16 connections may wait to authenticate at once', async () => {
   const s = await started();
   const socks = [];
   for (let i = 0; i < 16; i++) { const k = net.connect({ host: '127.0.0.1', port: s.port }); k.on('error', () => {}); socks.push(k); }
-  await new Promise((r) => setTimeout(r, 100));
+  const hellos = await Promise.all(socks.map((k) => new Promise((res) => k.once('data', (d) => res(String(d).includes('"hello"'))))));
+  assert.ok(hellos.every(Boolean), 'the first 16 received hello');
+  assert.ok(socks.every((k) => !k.destroyed), 'and stayed open');
   const extra = net.connect({ host: '127.0.0.1', port: s.port });
   extra.on('error', () => {});
   const closed = await new Promise((resolve) => { extra.on('close', () => resolve(true)); setTimeout(() => resolve(false), 1000); });
   assert.equal(closed, true, 'the 17th is dropped');
   for (const k of socks) k.destroy();
   extra.destroy();
+  await new Promise((r) => setTimeout(r, 100));
+  const again = await connect(s.port);
+  assert.equal(again.rejected, undefined, 'pending slots were freed');
+  again.close();
   await s.host.close();
 });
 
@@ -276,5 +286,68 @@ test('a client that stops reading is dropped instead of buffered without limit',
   for (let i = 0; i < 200 && s.host.status().clients; i++) s.host.output('p1', chunk);
   await new Promise((r) => setTimeout(r, 50));
   assert.equal(s.host.status().clients, 0, 'slow client dropped');
+  await s.host.close();
+});
+
+test('a connection gets one handshake attempt: later auth lines in the same write are ignored', async () => {
+  const s = await started();
+  const sock = net.connect({ host: '127.0.0.1', port: s.port });
+  sock.setEncoding('utf8');
+  sock.on('error', () => {});
+  const hello = await new Promise((res) => sock.once('data', (d) => res(JSON.parse(d.split('\n')[0]))));
+  const bad = JSON.stringify({ t: 'auth', dev: DEV, nonce: C.newNonce(), mac: 'x'.repeat(64) }) + '\n';
+  const cn = C.newNonce();
+  const good = JSON.stringify({ t: 'auth', dev: DEV, nonce: cn, mac: C.mac(SECRET, 'c', hello.nonce, cn, DEV) }) + '\n';
+  sock.write(bad.repeat(6) + good);
+  await new Promise((r) => setTimeout(r, 150));
+  assert.equal(s.host.status().clients, 0);
+  assert.deepEqual(s.calls, [], 'device never seen');
+  sock.destroy();
+  await s.host.close();
+});
+
+test('close() drops connections that are still handshaking; they cannot authenticate afterwards', async () => {
+  const s = await started();
+  const sock = net.connect({ host: '127.0.0.1', port: s.port });
+  sock.setEncoding('utf8');
+  sock.on('error', () => {});
+  let closed = false;
+  sock.on('close', () => { closed = true; });
+  const hello = await new Promise((res) => sock.once('data', (d) => res(JSON.parse(d.split('\n')[0]))));
+  const t0 = Date.now();
+  await s.host.close();
+  assert.ok(Date.now() - t0 < 500, 'close() did not hang');
+  const cn = C.newNonce();
+  sock.write(JSON.stringify({ t: 'auth', dev: DEV, nonce: cn, mac: C.mac(SECRET, 'c', hello.nonce, cn, DEV) }) + '\n');
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(closed, true);
+  assert.equal(s.host.status().clients, 0);
+  assert.deepEqual(s.calls, []);
+});
+
+test('errors from the session functions never reach the client with host paths in them', async () => {
+  const s = await started({ openProject: () => { throw new Error('ENOENT C:\\Users\\jacob\\secret'); } });
+  const c = await connect(s.port);
+  await c.next();
+  const res = await c.request('open', { id: 'p2' });
+  assert.equal(res.ok, false);
+  assert.equal(res.error, 'The request failed');
+  assert.equal((await c.request('open', { id: '' })).ok, false);
+  assert.equal((await c.request('open', { id: 5 })).error, 'Invalid session id');
+  c.close();
+  await s.host.close();
+});
+
+test('restarted forgets a half-finished escape sequence from the previous process', async () => {
+  const s = await started();
+  const a = await connect(s.port);
+  await a.next();
+  s.host.output('p1', '\x1b]9;4;');
+  s.host.restarted('p1');
+  await a.until((m) => m.t === 'restarted');
+  s.host.output('p1', '3\x07');
+  s.host.broadcast('workers', { id: 'p1', events: [] });
+  assert.equal((await a.next()).t, 'workers', 'no progress event from the stitched fragments');
+  a.close();
   await s.host.close();
 });

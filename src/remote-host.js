@@ -12,11 +12,14 @@ const LOCK_AFTER = 5;
 const LOCK_MS = 60000;
 const MAX_PENDING = 16; // sockets that have not authenticated yet
 const MAX_INPUT = 65536;
+class PublicError extends Error {} // only these messages are safe to show a client; anything else may hold host paths
 const dim = (n) => (Number.isInteger(n) && n >= 1 && n <= 500 ? n : undefined);
 
+// getDevices() entries are { id, secret, name? }; name is only used for the log.
 function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSession, openProject, write, resize, restart, closeSession, log = () => {},
   ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
   const clients = new Set();
+  const sockets = new Set(); // every accepted socket, authenticated or not
   const rings = new Map();
   const scanners = new Map();
   const failures = new Map(); // address -> timestamps of recent failed handshakes
@@ -47,6 +50,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   function restarted(id) {
     if (rings.has(id)) rings.get(id).clear();
+    scanners.delete(id);
     exitedIds.delete(id);
     lastProgress.delete(id);
     broadcast('restarted', { id });
@@ -54,9 +58,12 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   const handlers = {
     projects: () => snapshot(),
-    open: (c, a) => openProject(a.id, dim(a.cols), dim(a.rows)),
+    open: (c, a) => {
+      if (typeof a.id !== 'string' || !a.id) throw new PublicError('Invalid session id');
+      return openProject(a.id, dim(a.cols), dim(a.rows));
+    },
     attach: (c, a) => {
-      if (typeof a.id !== 'string' || !hasSession(a.id)) throw new Error('That session is not running');
+      if (typeof a.id !== 'string' || !hasSession(a.id)) throw new PublicError('That session is not running');
       c.attached.add(a.id);
       if (dim(a.cols) && dim(a.rows)) resize(a.id, dim(a.cols), dim(a.rows));
       return { snapshot: ring(a.id).snapshot(), progress: lastProgress.get(a.id) || null, exitCode: exitedIds.has(a.id) ? exitedIds.get(a.id) : null };
@@ -76,13 +83,14 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     try {
       reply({ ok: true, data: await fn(c, msg) });
     } catch (err) {
-      reply({ ok: false, error: err.message });
+      reply({ ok: false, error: err instanceof PublicError ? err.message : 'The request failed' });
     }
   }
 
   function onConnection(sock) {
     const addr = sock.remoteAddress || '';
-    if (locked(addr) || pending >= MAX_PENDING) { sock.destroy(); return; }
+    if (!server || locked(addr) || pending >= MAX_PENDING) { sock.destroy(); return; }
+    sockets.add(sock);
     sock.setEncoding('utf8');
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 15000);
@@ -90,6 +98,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     const c = { sock, channel: null, dev: null, attached: new Set() };
     const hostNonce = C.newNonce();
     let waiting = true;
+    let finished = false; // the first handshake line is final, whatever the outcome
     pending++;
     const done = () => { if (waiting) { waiting = false; pending--; } };
     const timer = setTimeout(() => { noteFailure(addr); sock.destroy(); }, HELLO_TIMEOUT_MS);
@@ -103,6 +112,9 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
 
     function handshake(line) {
+      if (finished) return;
+      finished = true;
+      if (!server || locked(addr)) { sock.destroy(); return; }
       let m;
       try { m = JSON.parse(line); } catch { return refuse(); }
       const dev = m && typeof m === 'object' ? (getDevices() || []).find((d) => d.id === m.dev) : null;
@@ -125,11 +137,11 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       if (!c.channel) return handshake(line);
       let msg;
       try { msg = c.channel.open(line); } catch { sock.destroy(); return; }
-      handle(c, msg);
+      handle(c, msg).catch(() => sock.destroy());
     }
 
     sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel) noteFailure(addr); sock.destroy(); } });
-    sock.on('close', () => { clearTimeout(timer); done(); clients.delete(c); });
+    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 
@@ -149,10 +161,10 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       });
     },
     close() {
-      for (const c of [...clients]) c.sock.destroy();
-      clients.clear();
       const s = server;
       server = null;
+      for (const k of [...sockets]) k.destroy();
+      clients.clear();
       return new Promise((resolve) => (s ? s.close(() => resolve()) : resolve()));
     },
     status: () => ({ listening: !!server, address: server ? where.address : '', port: server ? where.port : 0, clients: clients.size }),
