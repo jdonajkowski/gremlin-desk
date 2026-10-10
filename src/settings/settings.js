@@ -302,7 +302,7 @@
   };
 
   // --- Footer ----------------------------------------------------------------
-  const save = () => (tab === 'agents' ? saveAgents() : saveForm());
+  const save = () => { if (tab === 'remote') return; return tab === 'agents' ? saveAgents() : saveForm(); };
   $('btn-save').onclick = save;
   $('btn-json').onclick = () => host.openJson();
   $('btn-restart').onclick = () => host.restart();
