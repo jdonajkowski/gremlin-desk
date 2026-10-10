@@ -308,7 +308,7 @@
   $('btn-restart').onclick = () => host.restart();
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
-    if (e.key === 'Escape' && tab !== 'agents') window.close();
+    if (e.key === 'Escape' && tab !== 'agents' && tab !== 'remote') window.close();
   });
 
   fill(values);
