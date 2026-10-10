@@ -112,6 +112,8 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
       }
       let m;
       try { m = JSON.parse(line); } catch { return refuse('The other computer is not running Gremlin remote control.'); }
+      // A locked-out address is answered with "no" before any hello.
+      if (m && m.t === 'no') return refuse('The other computer rejected this pairing (wrong code, revoked, or too many attempts). Pair again, or wait a minute.');
       if (stage === 'hello') {
         if (!m || m.t !== 'hello' || m.v !== C.VERSION || !/^[0-9a-f]{32}$/.test(String(m.nonce))) return refuse('The other computer runs an incompatible version of Gremlin.');
         hostNonce = m.nonce;
@@ -119,7 +121,6 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
         s.write(JSON.stringify({ t: 'auth', dev: host.device, nonce: clientNonce, mac: C.mac(host.secret, 'c', hostNonce, clientNonce, host.device) }) + '\n');
         return;
       }
-      if (m && m.t === 'no') return refuse('The other computer rejected this pairing (wrong code, revoked, or too many attempts). Pair again, or wait a minute.');
       if (!m || m.t !== 'ok' || !C.macEqual(m.mac, C.mac(host.secret, 's', hostNonce, clientNonce, host.device))) return refuse('That computer could not prove it holds the pairing code, so it was not trusted.');
       const keys = C.deriveKeys(host.secret, hostNonce, clientNonce);
       channel = C.createChannel(keys.c2s, keys.s2c);

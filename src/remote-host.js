@@ -89,7 +89,10 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   function onConnection(sock) {
     const addr = sock.remoteAddress || '';
-    if (!server || locked(addr) || pending >= MAX_PENDING) { sock.destroy(); return; }
+    if (!server) { sock.destroy(); return; }
+    // A locked address gets the plain "no" (no failure recorded, no pending slot), so the client can say why.
+    if (locked(addr)) { sock.on('error', () => {}); sock.end(JSON.stringify({ t: 'no' }) + '\n'); return; }
+    if (pending >= MAX_PENDING) { sock.destroy(); return; }
     sockets.add(sock);
     sock.setEncoding('utf8');
     sock.setNoDelay(true);
@@ -114,7 +117,8 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     function handshake(line) {
       if (finished) return;
       finished = true;
-      if (!server || locked(addr)) { sock.destroy(); return; }
+      if (!server) { sock.destroy(); return; }
+      if (locked(addr)) { clearTimeout(timer); done(); sock.end(JSON.stringify({ t: 'no' }) + '\n'); return; }
       let m;
       try { m = JSON.parse(line); } catch { return refuse(); }
       const dev = m && typeof m === 'object' ? (getDevices() || []).find((d) => d.id === m.dev) : null;

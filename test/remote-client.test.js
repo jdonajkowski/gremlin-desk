@@ -140,7 +140,31 @@ test('a refused pairing stops retrying until reconnect() is called', async () =>
   await h.host.close();
 });
 
-test('a host that cannot prove it holds the secret is not trusted', async () => {
+test('a locked-out address is told the pairing was rejected, not "could not connect", and is not retried', async () => {
+  let t = 1000;
+  const h = await startHost({ now: () => t });
+  for (let i = 0; i < 5; i++) {
+    const bad = makeClient(h.port, { host: { address: '127.0.0.1', port: h.port, device: DEV, secret: C.newSecret() } });
+    bad.client.connect();
+    await until(() => bad.client.state().state === 'error');
+    bad.client.stop();
+  }
+  const { client, states } = makeClient(h.port); // the CORRECT secret
+  client.connect();
+  await until(() => client.state().state === 'error');
+  assert.match(client.state().error, /rejected this pairing/);
+  assert.doesNotMatch(client.state().error, /Could not connect/);
+  const count = states.length;
+  await sleep(150);
+  assert.equal(states.length, count, 'no retries while locked out');
+  t += 61000;
+  client.reconnect();
+  await until(() => client.state().state === 'online');
+  client.stop();
+  await h.host.close();
+});
+
+test('a host that cannot prove it holds the secret is not trusted',async () => {
   const net = require('net');
   const fake = net.createServer((sock) => {
     sock.setEncoding('utf8');

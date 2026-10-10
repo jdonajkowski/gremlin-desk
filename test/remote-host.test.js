@@ -118,7 +118,35 @@ test('five failed handshakes lock the address out; a good one is refused until t
   let t = 1000;
   const s = await started({ now: () => t });
   for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
-  await assert.rejects(connect(s.port), /closed/, 'locked out: dropped silently');
+  const locked = await connect(s.port, { secret: C.newSecret() });
+  assert.equal(locked.rejected, true, 'locked out: answered with no');
+  assert.equal((await connect(s.port)).rejected, true, 'a correct secret is still refused while locked');
+  t += 30000;
+  assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true, 'still locked halfway');
+  assert.equal(s.host.status().clients, 0);
+  t += 31000; // 61s after the real failures: attempts while locked did not extend the lock
+  const ok = await connect(s.port);
+  assert.equal(ok.rejected, undefined);
+  ok.close();
+  await s.host.close();
+});
+
+test('a locked address does not take pending slots', async () => {
+  let t = 1000;
+  const s = await started({ now: () => t });
+  for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
+  for (let i = 0; i < 20; i++) assert.equal((await connect(s.port)).rejected, true);
+  t += 61000;
+  const ok = await connect(s.port);
+  assert.equal(ok.rejected, undefined);
+  ok.close();
+  await s.host.close();
+});
+
+test('lock expiry lets a correct client in', async () => {
+  let t = 1000;
+  const s = await started({ now: () => t });
+  for (let i = 0; i < 5; i++) assert.equal((await connect(s.port, { secret: C.newSecret() })).rejected, true);
   t += 61000;
   const ok = await connect(s.port);
   assert.equal(ok.rejected, undefined);
