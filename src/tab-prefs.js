@@ -6,7 +6,8 @@
   const empty = () => ({ order: [], pinned: [], names: {} });
 
   // Terminal tabs are numbered again in every run (aux:1, aux:2...), so their names and pins are not kept between runs.
-  const temporary = (id) => /^aux:/.test(id);
+  // ...and remote sessions (r:host/project) are reconnected by hand each run.
+  const temporary = (id) => /^(aux|r):/.test(id);
 
   function parse(text) {
     let v;

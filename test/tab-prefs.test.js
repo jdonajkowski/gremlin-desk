@@ -42,3 +42,11 @@ test('terminal tabs (aux:N) are not kept between runs: ids restart at aux:1 ever
   const loaded = P.parse('{"order":["aux:1","p"],"pinned":["aux:1"],"names":{"aux:1":"build","p":"P"}}');
   assert.deepEqual(loaded, { order: ['p'], pinned: [], names: { p: 'P' } });
 });
+
+test('remote session ids are never kept between runs, like terminal tabs', () => {
+  const prefs = { order: ['r:desk/p', 'aux:3', 'c:\\p'], pinned: ['r:desk/p', 'c:\\p'], names: { 'r:desk/p': 'x', 'aux:3': 'y', 'c:\\p': 'z' } };
+  assert.deepEqual(P.forStorage(prefs), { order: ['c:\\p'], pinned: ['c:\\p'], names: { 'c:\\p': 'z' } });
+  const loaded = P.parse(JSON.stringify(prefs));
+  assert.deepEqual(loaded.order, ['c:\\p']);
+  assert.deepEqual(loaded.names, { 'c:\\p': 'z' });
+});
