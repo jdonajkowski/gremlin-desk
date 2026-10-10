@@ -215,3 +215,24 @@ test('a closed event forgets the attachment so open() asks the host again', asyn
   assert.equal(await t.m.open('r:desk/p1', 80, 24), true);
   assert.equal(c.reqs.filter((r) => r[0] === 'open').length, 2);
 });
+
+test('a malformed projects snapshot from a host is sanitized, never thrown on', () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  for (const bad of [{ t: 'projects' }, { t: 'projects', list: null, open: 'x', git: [] }, { t: 'projects', list: 'abc', open: {}, git: 5 }]) {
+    c.onEvent(bad);
+    assert.deepEqual(t.m.list(), []);
+    assert.deepEqual(t.m.openIds(), []);
+    assert.deepEqual(t.m.git(), {});
+  }
+  c.onEvent({
+    t: 'projects',
+    list: [null, 7, 'x', { id: 5, name: 'num' }, { id: '', name: 'empty' }, { id: 'noname' }, { id: 'ok', name: 'good', folder: 3, initials: 'G', worktreeOf: 9 }],
+    open: ['ok', 4, null],
+    git: { ok: { branch: 'main' }, junk: 'x', nul: null }
+  });
+  assert.deepEqual(t.m.list().map((p) => [p.id, p.name, p.folder, p.initials, p.worktreeOf]), [['r:desk/ok', 'good', null, 'G', null]]);
+  assert.deepEqual(t.m.openIds(), ['r:desk/ok']);
+  assert.deepEqual(t.m.git(), { 'r:desk/ok': { branch: 'main' } });
+});

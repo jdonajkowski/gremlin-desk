@@ -87,3 +87,10 @@ test('decorate: namespaced ids, no host paths, remote marker', () => {
   const out = R.decorate('desk', 'Desk PC', [{ id: 'c:\\p\\a', name: 'a', folder: 'a', initials: 'A', worktreeOf: null }]);
   assert.deepEqual(out, [{ id: 'r:desk/c:\\p\\a', path: '', name: 'a', folder: 'a', initials: 'A', pinned: false, missing: false, worktreeOf: null, remote: { hostId: 'desk', hostName: 'Desk PC' } }]);
 });
+
+test('decorate: skips entries without a usable id and tolerates a non-array', () => {
+  const out = R.decorate('desk', 'Desk PC', [null, 3, { name: 'x' }, { id: '', name: 'y' }, { id: 7, name: 'z' }, { id: 'ok', name: 'good' }]);
+  assert.deepEqual(out.map((p) => p.id), ['r:desk/ok']);
+  assert.deepEqual(R.decorate('desk', 'Desk PC', 'nope'), []);
+  assert.deepEqual(R.decorate('desk', 'Desk PC', null), []);
+});

@@ -6,6 +6,20 @@ const { nsId, parseNsId, decorate } = require('./remote-config');
 
 const LOST = '\r\n\x1b[90m[connection lost, reconnecting…]\x1b[0m\r\n';
 
+// A host is trusted with its sessions but not to be well-formed: keep only what the rail and git view can safely read.
+const isObj = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+const strOrNull = (v) => (typeof v === 'string' ? v : null);
+function sanitizeSnapshot(msg) {
+  const m = isObj(msg) ? msg : {};
+  const list = (Array.isArray(m.list) ? m.list : [])
+    .filter((p) => isObj(p) && typeof p.id === 'string' && p.id && typeof p.name === 'string')
+    .map((p) => ({ id: p.id, name: p.name, folder: strOrNull(p.folder), initials: strOrNull(p.initials), worktreeOf: strOrNull(p.worktreeOf) }));
+  const open = (Array.isArray(m.open) ? m.open : []).filter((id) => typeof id === 'string');
+  const git = {};
+  if (isObj(m.git)) for (const [k, v] of Object.entries(m.git)) if (isObj(v)) git[k] = v;
+  return { list, open, git };
+}
+
 function createRemoteClients({ getHosts, createClient = createRemoteClient, send, onChange = () => {} }) {
   const entries = new Map(); // host id -> { host, client, snapshot: { list, open, git } }
 
@@ -36,7 +50,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
       onEvent: (msg) => {
         if (entries.get(host.id) !== entry) return; // a stopped or replaced client's late events (e.g. 'lost' after stop)
         if (msg.t === 'projects') {
-          entry.snapshot = { list: msg.list || [], open: msg.open || [], git: msg.git || {} };
+          entry.snapshot = sanitizeSnapshot(msg);
           return onChange();
         }
         translate(host.id, entry.client, msg);
