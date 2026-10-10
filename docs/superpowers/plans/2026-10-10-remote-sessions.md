@@ -14,7 +14,7 @@
 
 - No new npm dependency. Transport is newline-delimited frames over `net`.
 - Remote control is **off by default**. The host listens only on a private IPv4 interface address (10/8, 172.16/12, 192.168/16, 100.64/10) or loopback. Never 0.0.0.0, never a public address.
-- Pre-auth lines are limited to 4096 bytes, post-auth lines to 1 MiB (`1 << 20`). The handshake must complete within 10 s.
+- Pre-auth lines are limited to 4096 bytes, post-auth lines to 16 MiB (`16 << 20`; a full replay of escape-heavy output is about 2 MB once JSON-escaped and base64-encoded). The handshake must complete within 10 s.
 - 5 failed handshakes from one address lock that address out for 60 s.
 - Frame crypto: HKDF-SHA256 per-direction keys, AES-256-GCM, 12-byte nonce from a per-direction counter. Replayed, reordered or tampered frames close the connection.
 - Ring buffer: 262144 characters per session.
@@ -65,7 +65,7 @@ Keep task order: each task builds on the previous ones.
 
 **Interfaces:**
 - Produces:
-  - `VERSION = 1`, `MAX_LINE = 1048576`, `MAX_PRE_AUTH_LINE = 4096`
+  - `VERSION = 1`, `MAX_LINE = 16777216`, `MAX_PRE_AUTH_LINE = 4096`
   - `newSecret(): string` (64 hex), `newNonce(): string` (32 hex)
   - `mac(secret, tag, hostNonce, clientNonce, dev): string` (hex HMAC-SHA256; tag `'c'` for client proof, `'s'` for host proof)
   - `macEqual(a, b): boolean` (constant time, false on malformed input)
@@ -107,6 +107,7 @@ test('mac: same inputs verify; other secret, tag or nonce does not; junk is fals
   assert.ok(!C.macEqual(m, 'zz'));
   assert.ok(!C.macEqual(m, undefined));
   assert.ok(!C.macEqual('', ''));
+  assert.ok(!C.macEqual(m + 'zz', m), 'trailing junk is not a match');
 });
 
 test('channel: frames round-trip in both directions', () => {
@@ -137,12 +138,12 @@ test('channel: tampered, replayed and reordered frames are rejected', () => {
 test('channel: a direction cannot read its own frames, and a wrong secret cannot read at all', () => {
   const k = C.deriveKeys(secret, hn, cn);
   const host = C.createChannel(k.s2c, k.c2s);
-  const echo = C.createChannel(k.c2s, k.s2c);
   assert.throws(() => host.open(host.seal({ a: 1 })), 'host frame opened with the host receive key');
   const other = C.deriveKeys(C.newSecret(), hn, cn);
   const wrong = C.createChannel(other.c2s, other.s2c);
-  assert.throws(() => wrong.open(host.seal({ a: 1 })));
-  assert.deepEqual(echo.open(host.seal({ a: 2 })), { a: 2 });
+  assert.throws(() => wrong.open(C.createChannel(k.s2c, k.c2s).seal({ a: 1 })));
+  const fresh = pair();
+  assert.deepEqual(fresh.client.open(fresh.host.seal({ a: 2 })), { a: 2 });
 });
 
 test('line reader: splits chunks into lines and enforces the limit', () => {
@@ -187,8 +188,11 @@ Create `src/remote-crypto.js`:
 const crypto = require('crypto');
 
 const VERSION = 1;
-const MAX_LINE = 1 << 20;
+const MAX_LINE = 16 << 20; // a 256K-character replay of escape-heavy output is ~2 MB sealed
 const MAX_PRE_AUTH_LINE = 4096;
+
+const HEX8 = /^[0-9a-f]{8}$/;
+const HEX64 = /^[0-9a-f]{64}$/;
 
 const newSecret = () => crypto.randomBytes(32).toString('hex');
 const newNonce = () => crypto.randomBytes(16).toString('hex');
@@ -200,9 +204,8 @@ function mac(secret, tag, hostNonce, clientNonce, dev) {
 
 function macEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
-  const x = Buffer.from(a, 'hex');
-  const y = Buffer.from(b, 'hex');
-  return x.length > 0 && x.length === y.length && crypto.timingSafeEqual(x, y);
+  if (!HEX64.test(a) || !HEX64.test(b)) return false; // Buffer.from(hex) stops at the first bad character, so check the shape first
+  return crypto.timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
 }
 
 function deriveKeys(secret, hostNonce, clientNonce) {
@@ -256,9 +259,6 @@ function createLineReader(onLine, maxLen) {
     setMax(n) { maxLen = n; }
   };
 }
-
-const HEX8 = /^[0-9a-f]{8}$/;
-const HEX64 = /^[0-9a-f]{64}$/;
 
 function makePairingCode({ device, secret }) {
   return 'gremlin1.' + Buffer.from(JSON.stringify({ d: device, s: secret })).toString('base64url');
@@ -507,13 +507,14 @@ test('isPrivateV4 / isListenable: private ranges and loopback only', () => {
   assert.ok(!R.isListenable('203.0.113.5'));
 });
 
-test('privateInterfaces: private IPv4 first, loopback last, nothing public or IPv6', () => {
+test('privateInterfaces: home LAN ranges first, loopback last, nothing public or IPv6', () => {
   const ifaces = {
+    wsl: [{ family: 'IPv4', address: '172.20.0.1', internal: false }],
     eth0: [{ family: 'IPv4', address: '192.168.1.20', internal: false }, { family: 'IPv6', address: 'fe80::1', internal: false }],
     wan: [{ family: 'IPv4', address: '203.0.113.5', internal: false }],
     lo: [{ family: 'IPv4', address: '127.0.0.1', internal: true }]
   };
-  assert.deepEqual(R.privateInterfaces(ifaces), [{ name: 'eth0', address: '192.168.1.20' }, { name: 'This computer only', address: '127.0.0.1' }]);
+  assert.deepEqual(R.privateInterfaces(ifaces), [{ name: 'eth0', address: '192.168.1.20' }, { name: 'wsl', address: '172.20.0.1' }, { name: 'This computer only', address: '127.0.0.1' }]);
 });
 
 test('normalize: defaults, bad ports and entries dropped, duplicates removed', () => {
@@ -625,6 +626,9 @@ function privateInterfaces(ifaces) {
   for (const [name, list] of Object.entries(ifaces || {})) {
     for (const i of list || []) if (i && i.family === 'IPv4' && !i.internal && isPrivateV4(i.address)) out.push({ name, address: i.address });
   }
+  // Home LAN ranges first: on Windows the WSL / Hyper-V adapter is often a 172.x address and must not be the default.
+  const rank = (a) => (a.startsWith('192.168.') ? 0 : a.startsWith('10.') ? 1 : a.startsWith('100.') ? 2 : 3);
+  out.sort((x, y) => rank(x.address) - rank(y.address));
   out.push({ name: 'This computer only', address: '127.0.0.1' });
   return out;
 }
@@ -739,13 +743,13 @@ git commit -m "feat: remote.json model, device pairing and id namespacing" -m "C
   - `status(): { listening: boolean, address: string, port: number, clients: number }`
   - `output(id, data)`: PTY output (ring + progress scan + attached clients)
   - `exited(id, code)`: broadcast `exit`
-  - `reset(id)`: clear the session's ring
+  - `restarted(id)`: clear the session's ring, forget its exit and progress, broadcast `restarted`
   - `drop(id)`: delete ring and scanner (session closed)
   - `broadcast(t, payload)`: to every authenticated client (`t` is the event name, payload is an object merged into the frame)
-  - `projectsChanged()`: broadcast `projects` with `snapshot()`
+  - `projectsChanged()`: broadcast `projects` with `snapshot()`, but only when it differs from the last one broadcast (two Gremlins paired with each other would otherwise echo forever)
   - `disconnectDevice(deviceId)`
-- `opts`: `{ getDevices() => [{id, secret}], onDeviceSeen(id), snapshot() => {list, open, git}, hasSession(id) => bool, openProject(id, cols, rows) => bool|Promise<bool>, write(id, data), resize(id, cols, rows), restart(id, cols, rows), closeSession(id), ringSize = 262144, maxQueued = 8388608, now = Date.now, netImpl = require('net') }`
-- Wire protocol (inside the encrypted channel): requests are `{ t, rid, ...args }`, answered by `{ t: 'res', rid, ok: true, data }` or `{ t: 'res', rid, ok: false, error }`. A message without `rid` gets no answer (used for `input`, `resize`, `restart`). Events from the host: `projects` (`{list, open, git}`), `data` (`{id, data}`), `exit` (`{id, code}`), `sevent` (`{id, ev: {t: 'progress', state, value}}`), `workers` (`{id, events}`), `status` (`{id, status}`), `closed` (`{id}`). Requests: `projects`, `open {id, cols, rows}`, `attach {id, cols, rows}` (data: `{ snapshot }`), `detach {id}`, `input {id, data}`, `resize {id, cols, rows}`, `restart {id, cols, rows}`, `close {id}`.
+- `opts`: `{ getDevices() => [{id, secret}], onDeviceSeen(id), snapshot() => {list, open, git}, hasSession(id) => bool, openProject(id, cols, rows) => bool|Promise<bool>, write(id, data), resize(id, cols, rows), restart(id, cols, rows), closeSession(id), log(entry) = no-op, ringSize = 262144, maxQueued = 8388608, now = Date.now, netImpl = require('net') }`. `log` receives `{ result: 'ok' | 'refused', device? }` (device name and result only)
+- Wire protocol (inside the encrypted channel): requests are `{ t, rid, ...args }`, answered by `{ t: 'res', rid, ok: true, data }` or `{ t: 'res', rid, ok: false, error }`. A message without `rid` gets no answer (used for `input`, `resize`, `restart`). Events from the host: `projects` (`{list, open, git}`), `data` (`{id, data}`), `exit` (`{id, code}`), `restarted` (`{id}`), `sevent` (`{id, ev: {t: 'progress', state, value}}`), `workers` (`{id, events}`), `status` (`{id, status}`), `closed` (`{id}`). Requests: `projects`, `open {id, cols, rows}`, `attach {id, cols, rows}` (data: `{ snapshot, progress: {state, value} | null, exitCode: number | null }`), `detach {id}`, `input {id, data}`, `resize {id, cols, rows}`, `restart {id, cols, rows}`, `close {id}`.
 - Handshake (plain JSON lines): host sends `{t:'hello', v:1, nonce}`; client replies `{t:'auth', dev, nonce, mac}`; host answers `{t:'ok', mac}` or `{t:'no'}` then closes. A locked-out address is closed silently.
 
 - [ ] **Step 1: Write the failing test**
@@ -918,7 +922,7 @@ test('attach returns the replay buffer, then live output only to attached client
   s.host.output('p1', 'hello ');
   s.host.output('p1', 'world');
   const res = await a.request('attach', { id: 'p1', cols: 100, rows: 30 });
-  assert.deepEqual(res.data, { snapshot: 'hello world' });
+  assert.deepEqual(res.data, { snapshot: 'hello world', progress: null, exitCode: null });
   assert.deepEqual(s.calls.filter((x) => x[0] === 'resize'), [['resize', 'p1', 100, 30]]);
   s.host.output('p1', '!');
   assert.deepEqual(await a.until((m) => m.t === 'data'), { t: 'data', id: 'p1', data: '!' });
@@ -929,18 +933,71 @@ test('attach returns the replay buffer, then live output only to attached client
   await s.host.close();
 });
 
-test('reset clears the replay buffer; exited and projectsChanged reach everyone', async () => {
+test('restarted clears the replay buffer and tells everyone; exited and projectsChanged reach everyone', async () => {
   const s = await started();
   const a = await connect(s.port);
   await a.next();
   s.host.output('p1', 'old');
-  s.host.reset('p1');
+  s.host.restarted('p1');
+  assert.deepEqual(await a.until((m) => m.t === 'restarted'), { t: 'restarted', id: 'p1' });
   assert.equal((await a.request('attach', { id: 'p1' })).data.snapshot, '');
   s.host.exited('p1', 3);
   assert.deepEqual(await a.until((m) => m.t === 'exit'), { t: 'exit', id: 'p1', code: 3 });
+  assert.equal((await a.request('attach', { id: 'p1' })).data.exitCode, 3, 'a late viewer learns the session ended');
   s.host.projectsChanged();
   assert.equal((await a.until((m) => m.t === 'projects')).list[0].id, 'p1');
+  s.host.projectsChanged(); // unchanged: not sent again
+  s.host.broadcast('workers', { id: 'p1', events: [] });
+  assert.equal((await a.next()).t, 'workers');
   a.close();
+  await s.host.close();
+});
+
+test('output for a session that no longer exists is ignored (late data from a killed PTY)', async () => {
+  const s = await started();
+  const a = await connect(s.port);
+  await a.next();
+  s.host.output('gone', 'stale');
+  s.host.drop('gone');
+  s.host.broadcast('workers', { id: 'x', events: [] });
+  assert.equal((await a.next()).t, 'workers', 'nothing was sent for the dead session');
+  a.close();
+  await s.host.close();
+});
+
+test('the current progress is part of the attach reply, so a late viewer shows the right dot', async () => {
+  const s = await started();
+  const a = await connect(s.port);
+  await a.next();
+  s.host.output('p1', '\x1b]9;4;3\x07');
+  assert.deepEqual((await a.request('attach', { id: 'p1' })).data.progress, { state: 3, value: 0 });
+  a.close();
+  await s.host.close();
+});
+
+test('a full screen of escape characters still replays (the frame limit is not hit)', async () => {
+  const s = await started({ ringSize: 262144 });
+  const a = await connect(s.port);
+  await a.next();
+  s.host.output('p1', '\x1b'.repeat(262144));
+  const res = await a.request('attach', { id: 'p1' });
+  assert.equal(res.ok, true);
+  assert.equal(res.data.snapshot.length, 262144);
+  a.close();
+  await s.host.close();
+});
+
+test('only 16 connections may wait to authenticate at once', async () => {
+  const s = await started();
+  const socks = [];
+  for (let i = 0; i < 16; i++) { const k = net.connect({ host: '127.0.0.1', port: s.port }); k.on('error', () => {}); socks.push(k); }
+  await new Promise((r) => setTimeout(r, 100));
+  const extra = net.connect({ host: '127.0.0.1', port: s.port });
+  extra.on('error', () => {});
+  const closed = await new Promise((resolve) => { extra.on('close', () => resolve(true)); setTimeout(() => resolve(false), 1000); });
+  assert.equal(closed, true, 'the 17th is dropped');
+  for (const k of socks) k.destroy();
+  extra.destroy();
   await s.host.close();
 });
 
@@ -976,6 +1033,7 @@ test('a client that stops reading is dropped instead of buffered without limit',
   a.sock.pause();
   const chunk = 'x'.repeat(1 << 20);
   for (let i = 0; i < 200 && s.host.status().clients; i++) s.host.output('p1', chunk);
+  await new Promise((r) => setTimeout(r, 50));
   assert.equal(s.host.status().clients, 0, 'slow client dropped');
   await s.host.close();
 });
@@ -1003,15 +1061,20 @@ const { isListenable } = require('./remote-config');
 const HELLO_TIMEOUT_MS = 10000;
 const LOCK_AFTER = 5;
 const LOCK_MS = 60000;
+const MAX_PENDING = 16; // sockets that have not authenticated yet
 const MAX_INPUT = 65536;
 const dim = (n) => (Number.isInteger(n) && n >= 1 && n <= 500 ? n : undefined);
 
-function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSession, openProject, write, resize, restart, closeSession,
+function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSession, openProject, write, resize, restart, closeSession, log = () => {},
   ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
   const clients = new Set();
   const rings = new Map();
   const scanners = new Map();
   const failures = new Map(); // address -> timestamps of recent failed handshakes
+  const lastProgress = new Map(); // session id -> { state, value }, for late viewers
+  const exitedIds = new Map(); // session id -> exit code while it is not running
+  let lastProjects = '';
+  let pending = 0;
   let server = null;
   let where = { address: '', port: 0 };
 
@@ -1020,7 +1083,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   function locked(addr) {
     const recent = (failures.get(addr) || []).filter((t) => now() - t < LOCK_MS);
-    failures.set(addr, recent);
+    if (recent.length) failures.set(addr, recent); else failures.delete(addr);
     return recent.length >= LOCK_AFTER;
   }
   const noteFailure = (addr) => failures.set(addr, [...(failures.get(addr) || []), now()]);
@@ -1028,10 +1091,17 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
   function sendTo(c, t, payload) {
     if (!c.channel || c.sock.destroyed) return;
     // A client that stopped reading (asleep, unplugged) must not make the host buffer its output forever.
-    if (c.sock.writableLength > maxQueued) { c.sock.destroy(); return; }
+    if (c.sock.writableLength > maxQueued) { c.sock.destroy(); clients.delete(c); return; }
     c.sock.write(c.channel.seal({ t, ...payload }) + '\n');
   }
-  const broadcast = (t, payload) => { for (const c of clients) sendTo(c, t, payload); };
+  const broadcast = (t, payload) => { for (const c of [...clients]) sendTo(c, t, payload); };
+
+  function restarted(id) {
+    if (rings.has(id)) rings.get(id).clear();
+    exitedIds.delete(id);
+    lastProgress.delete(id);
+    broadcast('restarted', { id });
+  }
 
   const handlers = {
     projects: () => snapshot(),
@@ -1040,12 +1110,12 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       if (typeof a.id !== 'string' || !hasSession(a.id)) throw new Error('That session is not running');
       c.attached.add(a.id);
       if (dim(a.cols) && dim(a.rows)) resize(a.id, dim(a.cols), dim(a.rows));
-      return { snapshot: ring(a.id).snapshot() };
+      return { snapshot: ring(a.id).snapshot(), progress: lastProgress.get(a.id) || null, exitCode: exitedIds.has(a.id) ? exitedIds.get(a.id) : null };
     },
     detach: (c, a) => { c.attached.delete(a.id); return true; },
     input: (c, a) => { if (typeof a.data === 'string' && a.data.length <= MAX_INPUT && hasSession(a.id)) write(a.id, a.data); return true; },
     resize: (c, a) => { if (dim(a.cols) && dim(a.rows) && hasSession(a.id)) resize(a.id, dim(a.cols), dim(a.rows)); return true; },
-    restart: (c, a) => { if (hasSession(a.id)) { ring(a.id).clear(); restart(a.id, dim(a.cols), dim(a.rows)); } return true; },
+    restart: (c, a) => { if (hasSession(a.id)) { restarted(a.id); restart(a.id, dim(a.cols), dim(a.rows)); } return true; },
     close: (c, a) => { if (hasSession(a.id)) closeSession(a.id); return true; }
   };
 
@@ -1063,19 +1133,23 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
 
   function onConnection(sock) {
     const addr = sock.remoteAddress || '';
-    if (locked(addr)) { sock.destroy(); return; }
+    if (locked(addr) || pending >= MAX_PENDING) { sock.destroy(); return; }
     sock.setEncoding('utf8');
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 15000);
     sock.on('error', () => {});
     const c = { sock, channel: null, dev: null, attached: new Set() };
     const hostNonce = C.newNonce();
-    const timer = setTimeout(() => sock.destroy(), HELLO_TIMEOUT_MS);
+    let waiting = true;
+    pending++;
+    const done = () => { if (waiting) { waiting = false; pending--; } };
+    const timer = setTimeout(() => { noteFailure(addr); sock.destroy(); }, HELLO_TIMEOUT_MS);
     timer.unref();
     const reader = C.createLineReader(onLine, C.MAX_PRE_AUTH_LINE);
 
     function refuse() {
       noteFailure(addr);
+      log({ result: 'refused' });
       sock.end(JSON.stringify({ t: 'no' }) + '\n');
     }
 
@@ -1085,7 +1159,9 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       const dev = m && typeof m === 'object' ? (getDevices() || []).find((d) => d.id === m.dev) : null;
       if (!dev || m.t !== 'auth' || !/^[0-9a-f]{32}$/.test(String(m.nonce)) || !C.macEqual(m.mac, C.mac(dev.secret, 'c', hostNonce, m.nonce, dev.id))) return refuse();
       clearTimeout(timer);
+      done();
       failures.delete(addr);
+      log({ result: 'ok', device: dev.name || dev.id });
       const keys = C.deriveKeys(dev.secret, hostNonce, m.nonce);
       sock.write(JSON.stringify({ t: 'ok', mac: C.mac(dev.secret, 's', hostNonce, m.nonce, dev.id) }) + '\n');
       c.channel = C.createChannel(keys.s2c, keys.c2s);
@@ -1103,8 +1179,8 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
       handle(c, msg);
     }
 
-    sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { sock.destroy(); } });
-    sock.on('close', () => { clearTimeout(timer); clients.delete(c); });
+    sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel) noteFailure(addr); sock.destroy(); } });
+    sock.on('close', () => { clearTimeout(timer); done(); clients.delete(c); });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 
@@ -1132,19 +1208,32 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     },
     status: () => ({ listening: !!server, address: server ? where.address : '', port: server ? where.port : 0, clients: clients.size }),
     output(id, data) {
+      if (!hasSession(id)) return; // a killed PTY can still emit a last chunk: it must not recreate the buffer
       ring(id).push(data);
-      for (const p of scanner(id).feed(data)) broadcast('sevent', { id, ev: { t: 'progress', state: p.state, value: p.value } });
+      for (const p of scanner(id).feed(data)) {
+        lastProgress.set(id, { state: p.state, value: p.value });
+        broadcast('sevent', { id, ev: { t: 'progress', state: p.state, value: p.value } });
+      }
       for (const c of clients) if (c.attached.has(id)) sendTo(c, 'data', { id, data });
     },
-    exited: (id, code) => broadcast('exit', { id, code }),
-    reset: (id) => { if (rings.has(id)) rings.get(id).clear(); },
+    exited: (id, code) => { exitedIds.set(id, code); broadcast('exit', { id, code }); },
+    restarted,
     drop(id) {
       rings.delete(id);
       scanners.delete(id);
+      lastProgress.delete(id);
+      exitedIds.delete(id);
       for (const c of clients) c.attached.delete(id);
     },
     broadcast,
-    projectsChanged: () => { if (clients.size) broadcast('projects', snapshot()); },
+    projectsChanged() {
+      if (!clients.size) return;
+      const snap = snapshot();
+      const json = JSON.stringify(snap);
+      if (json === lastProjects) return;
+      lastProjects = json;
+      broadcast('projects', snap);
+    },
     disconnectDevice(deviceId) { for (const c of [...clients]) if (c.dev === deviceId) c.sock.destroy(); }
   };
 }
@@ -1155,7 +1244,7 @@ module.exports = { createRemoteHost };
 - [ ] **Step 4: Run to verify pass**
 
 Run: `node --test test/remote-host.test.js`
-Expected: PASS, 11 tests. If the lockout test hangs, check that a locked address is destroyed before `hello` is written (the `locked()` check comes first in `onConnection`).
+Expected: PASS, 14 tests. If the lockout test hangs, check that a locked address is destroyed before `hello` is written (the `locked()` check comes first in `onConnection`).
 
 - [ ] **Step 5: Run the whole suite and commit**
 
@@ -1179,11 +1268,11 @@ git commit -m "feat: remote session host server" -m "Co-Authored-By: Claude Sonn
 - Consumes: Task 1 and Task 4 (the test runs a real `createRemoteHost` on loopback).
 - Produces `createRemoteClient({ host, onState, onEvent, netImpl, timers, delays, requestTimeoutMs })` with `host = { address, port, device, secret }`:
   - `connect()`, `stop()`, `reconnect()` (manual; also leaves the `error` state)
-  - `request(t, args): Promise<data>` (rejects `Error('Not connected')` when not online; rejects with the host's `error` text on `ok: false`; times out after `requestTimeoutMs`, default 15000)
+  - `request(t, args, onResult?): Promise<data>` (`onResult(data)` runs synchronously when the answer is read, before any frame that follows it in the same chunk; rejects `Error('Not connected')` when not online; rejects with the host's `error` text on `ok: false`; times out after `requestTimeoutMs`, default 15000)
   - `notify(t, args)`: fire-and-forget (dropped unless online)
-  - `attach(id, cols, rows): Promise<void>`, `detach(id)`, `resize(id, cols, rows)`
+  - `attach(id, cols, rows): Promise<void>`, `detach(id)`, `resize(id, cols, rows)`, `isAttached(id): boolean`
   - `state(): { state, error }` where state is `'offline' | 'connecting' | 'online' | 'error'`
-- `onState({ state, error })` fires on every change. `onEvent(msg)` receives every host event (`projects`, `data`, `exit`, `sevent`, `workers`, `status`, `closed`) plus three local events: `{ t: 'snapshot', id, data }` (replay text after an attach), `{ t: 'resync', id }` (sent just before a re-attach after reconnect, so the renderer resets that terminal), `{ t: 'lost', id }` (an attached session's connection dropped).
+- `onState({ state, error })` fires on every change. `onEvent(msg)` receives every host event (`projects`, `data`, `exit`, `sevent`, `workers`, `status`, `closed`) plus three local events: `{ t: 'snapshot', id, data, progress, exitCode }` (replay text and the session's current progress / exit code after an attach), `{ t: 'resync', id }` (sent just before a re-attach after reconnect, so the renderer resets that terminal), `{ t: 'lost', id }` (an attached session's connection dropped).
 - Reconnect: `delays` default `[2000, 5000, 10000, 30000]`. A host that answers `no` (wrong/revoked code, locked out) puts the client in `error` and stops retrying until `reconnect()`.
 
 - [ ] **Step 1: Write the failing test**
@@ -1257,7 +1346,8 @@ test('attach delivers the replay as a snapshot event, then live data', async () 
   client.connect();
   await until(() => client.state().state === 'online');
   await client.attach('p1', 100, 30);
-  assert.deepEqual(events.find((e) => e.t === 'snapshot'), { t: 'snapshot', id: 'p1', data: 'before ' });
+  assert.deepEqual(events.find((e) => e.t === 'snapshot'), { t: 'snapshot', id: 'p1', data: 'before ', progress: null, exitCode: null });
+  assert.equal(client.isAttached('p1'), true);
   h.host.output('p1', 'after');
   await until(() => events.some((e) => e.t === 'data' && e.data === 'after'));
   client.notify('input', { id: 'p1', data: 'hi' });
@@ -1275,6 +1365,7 @@ test('an unreachable host leaves the client offline with a plain reason, and it 
   const { client, states } = makeClient(port);
   client.connect();
   await until(() => states.filter((s) => s === 'connecting').length >= 2);
+  await until(() => client.state().state === 'offline');
   const s = client.state();
   assert.equal(s.state, 'offline');
   assert.match(s.error, /could not connect/i);
@@ -1401,12 +1492,12 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
     if (channel && sock && !sock.destroyed) sock.write(channel.seal(obj) + '\n');
   }
 
-  function request(t, args = {}) {
+  function request(t, args = {}, onResult) {
     return new Promise((resolve, reject) => {
       if (status.state !== 'online' || !channel) return reject(new Error('Not connected'));
       const rid = nextRid++;
       const timer = timers.set(() => { pending.delete(rid); reject(new Error('The other computer did not answer')); }, requestTimeoutMs);
-      pending.set(rid, { resolve, reject, timer });
+      pending.set(rid, { resolve, reject, timer, onResult });
       write({ t, rid, ...args });
     });
   }
@@ -1417,7 +1508,14 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
     if (!p) return;
     pending.delete(msg.rid);
     timers.clear(p.timer);
-    if (msg.ok) p.resolve(msg.data); else p.reject(new Error(msg.error || 'Failed'));
+    if (msg.ok) {
+      if (p.onResult) p.onResult(msg.data); // before the next frame in this chunk is handled, so a replay precedes live data
+      p.resolve(msg.data);
+    } else {
+      const err = new Error(msg.error || 'Failed');
+      err.fromHost = true;
+      p.reject(err);
+    }
   }
 
   function failAll(message) {
@@ -1425,13 +1523,15 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
   }
 
   // After a reconnect the host has forgotten who was attached: tell the renderer to reset each terminal, then replay.
+  const emitSnapshot = (id, r) => onEvent({ t: 'snapshot', id, data: r.snapshot, progress: r.progress || null, exitCode: r.exitCode == null ? null : r.exitCode });
+
   function reattach() {
     for (const [id, dims] of attached) {
       onEvent({ t: 'resync', id });
-      request('attach', { id, ...dims }).then(
-        (r) => onEvent({ t: 'snapshot', id, data: r.snapshot }),
-        () => { attached.delete(id); onEvent({ t: 'closed', id }); }
-      );
+      request('attach', { id, ...dims }, (r) => emitSnapshot(id, r)).catch((err) => {
+        // Only the host saying the session is gone ends it; a connection that dropped again is retried on the next reconnect.
+        if (err.fromHost) { attached.delete(id); onEvent({ t: 'closed', id }); }
+      });
     }
   }
 
@@ -1519,10 +1619,9 @@ function createRemoteClient({ host, onState = () => {}, onEvent = () => {}, netI
     request,
     notify,
     async attach(id, cols, rows) {
-      const r = await request('attach', { id, cols, rows });
-      attached.set(id, { cols, rows });
-      onEvent({ t: 'snapshot', id, data: r.snapshot });
+      await request('attach', { id, cols, rows }, (r) => { attached.set(id, { cols, rows }); emitSnapshot(id, r); });
     },
+    isAttached: (id) => attached.has(id),
     detach(id) { attached.delete(id); notify('detach', { id }); },
     resize(id, cols, rows) {
       if (attached.has(id)) attached.set(id, { cols, rows });
@@ -1564,13 +1663,13 @@ git commit -m "feat: remote session client connection" -m "Co-Authored-By: Claud
   - `sync()`: start clients for new hosts, stop clients for removed ones (call at startup and after the paired-host list changes)
   - `has(id)`: true for a namespaced id of a known host
   - `isOpen(id)`: the host reports that session as running
-  - `list()`: decorated projects of online hosts (host order, then the host's order)
+  - `list()`: decorated projects of every paired host (host order, then the host's order); rows of a host that is not connected keep their last known state and are flagged `remote.offline: true`
   - `openIds()`: namespaced ids of running remote sessions
   - `git()`: namespaced git map of online hosts
   - `hosts()`: `[{ id, name, address, port, state, error }]`
   - `open(id, cols, rows): Promise<boolean>`; `write(id, data)`; `resize(id, cols, rows)`; `restart(id, cols, rows)`; `close(id): Promise`
   - `reconnect(hostId)`, `stopAll()`
-- Event translation (client event → `send(channel, payload)` to the renderer, ids namespaced): `data` → `pty:data {id, data}`; `exit` → `pty:exit {id, code}`; `workers` → `workers:events {id, events}`; `status` → `status:update {id, status}`; `sevent` → `remote:sevent {id, ev}`; `snapshot` → `remote:replay {id, data}`; `resync` → `remote:reset {id}`; `closed` → `session:closed {id}`; `lost` → `pty:data {id, data: '\r\n\x1b[90m[connection lost, reconnecting…]\x1b[0m\r\n'}`. `projects` replaces the host's cached snapshot and calls `onChange()`. Any state change also calls `onChange()`.
+- Event translation (client event → `send(channel, payload)` to the renderer, ids namespaced): `data` → `pty:data {id, data}`; `exit` → `pty:exit {id, code}`; `workers` → `workers:events {id, events}`; `status` → `status:update {id, status}`; `sevent` → `remote:sevent {id, ev}`; `snapshot` → `remote:replay {id, data, progress}` and, when `exitCode` is not null, `pty:exit {id, code}` right after it; `resync` and `restarted` → `remote:reset {id}`; `closed` → `session:closed {id}`; `lost` → `pty:data {id, data: '\r\n\x1b[90m[connection lost, reconnecting…]\x1b[0m\r\n'}`. `projects` replaces the host's cached snapshot and calls `onChange()`. Any state change also calls `onChange()`.
 - Input to an offline host is dropped (`client.notify` already ignores it).
 
 - [ ] **Step 1: Write the failing test**
@@ -1593,7 +1692,8 @@ function fakeFactory() {
       state: () => c.st || { state: 'offline', error: '' },
       notify: (t, a) => c.sent.push([t, a]),
       request: async (t, a) => { c.reqs.push([t, a]); return c.reply === undefined ? true : c.reply; },
-      attach: async (id, cols, rows) => { c.reqs.push(['attach', { id, cols, rows }]); },
+      attach: async (id, cols, rows) => { c.reqs.push(['attach', { id, cols, rows }]); (c.att = c.att || new Set()).add(id); },
+      isAttached: (id) => !!(c.att && c.att.has(id)),
       detach: (id) => c.sent.push(['detach', { id }]),
       resize: (id, cols, rows) => c.sent.push(['resize', { id, cols, rows }])
     };
@@ -1626,13 +1726,14 @@ test('sync starts a client per host and stops removed ones', () => {
   assert.deepEqual(t.m.hosts(), []);
 });
 
-test('projects of online hosts are listed with namespaced ids; offline hosts list none', () => {
+test('projects are listed with namespaced ids; a host that is not connected keeps its rows, flagged offline', () => {
   const t = setup();
   const c = t.made.desk;
   c.onEvent({ t: 'projects', list: [{ id: 'c:\\p\\a', name: 'a', folder: 'a', initials: 'A' }], open: ['c:\\p\\a'], git: { 'c:\\p\\a': { branch: 'main' } } });
-  assert.deepEqual(t.m.list(), [], 'still offline');
+  assert.deepEqual(t.m.list().map((p) => [p.id, p.remote.offline]), [['r:desk/c:\\p\\a', true]], 'not connected yet: shown dimmed');
+  assert.deepEqual(t.m.openIds(), [], 'but not counted as running');
   online(c);
-  assert.deepEqual(t.m.list().map((p) => p.id), ['r:desk/c:\\p\\a']);
+  assert.deepEqual(t.m.list().map((p) => [p.id, p.remote.offline]), [['r:desk/c:\\p\\a', undefined]]);
   assert.deepEqual(t.m.openIds(), ['r:desk/c:\\p\\a']);
   assert.deepEqual(Object.keys(t.m.git()), ['r:desk/c:\\p\\a']);
   assert.ok(t.m.isOpen('r:desk/c:\\p\\a'));
@@ -1657,9 +1758,11 @@ test('events become renderer messages with namespaced ids', () => {
   e({ t: 'workers', id: 'p', events: [1] });
   e({ t: 'status', id: 'p', status: { a: 1 } });
   e({ t: 'sevent', id: 'p', ev: { t: 'progress', state: 3, value: 0 } });
-  e({ t: 'snapshot', id: 'p', data: 'screen' });
+  e({ t: 'snapshot', id: 'p', data: 'screen', progress: null, exitCode: null });
   e({ t: 'resync', id: 'p' });
+  e({ t: 'restarted', id: 'p' });
   e({ t: 'closed', id: 'p' });
+  e({ t: 'snapshot', id: 'p', data: 'ended', progress: { state: 0, value: 0 }, exitCode: 1 });
   e({ t: 'lost', id: 'p' });
   e({ t: 'unknown', id: 'p' });
   const id = 'r:desk/p';
@@ -1669,9 +1772,12 @@ test('events become renderer messages with namespaced ids', () => {
     ['workers:events', { id, events: [1] }],
     ['status:update', { id, status: { a: 1 } }],
     ['remote:sevent', { id, ev: { t: 'progress', state: 3, value: 0 } }],
-    ['remote:replay', { id, data: 'screen' }],
+    ['remote:replay', { id, data: 'screen', progress: null }],
+    ['remote:reset', { id }],
     ['remote:reset', { id }],
     ['session:closed', { id }],
+    ['remote:replay', { id, data: 'ended', progress: { state: 0, value: 0 } }],
+    ['pty:exit', { id, code: 1 }],
     ['pty:data', { id, data: '\r\n\x1b[90m[connection lost, reconnecting…]\x1b[0m\r\n' }]
   ]);
 });
@@ -1682,8 +1788,10 @@ test('open asks the host to start the session, then attaches; a refusal or error
   online(c);
   assert.equal(await t.m.open('r:desk/c:\\p\\a', 100, 30), true);
   assert.deepEqual(c.reqs, [['open', { id: 'c:\\p\\a', cols: 100, rows: 30 }], ['attach', { id: 'c:\\p\\a', cols: 100, rows: 30 }]]);
-  c.reply = false;
   c.reqs.length = 0;
+  assert.equal(await t.m.open('r:desk/c:\\p\\a', 100, 30), true);
+  assert.deepEqual(c.reqs, [], 'already attached: no second replay on top of the screen');
+  c.reply = false;
   assert.equal(await t.m.open('r:desk/x', 100, 30), false);
   assert.deepEqual(c.reqs, [['open', { id: 'x', cols: 100, rows: 30 }]], 'no attach after a refusal');
   c.request = async () => { throw new Error('Not connected'); };
@@ -1747,8 +1855,11 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
       case 'workers': return send('workers:events', { id, events: msg.events });
       case 'status': return send('status:update', { id, status: msg.status });
       case 'sevent': return send('remote:sevent', { id, ev: msg.ev });
-      case 'snapshot': return send('remote:replay', { id, data: msg.data });
-      case 'resync': return send('remote:reset', { id });
+      case 'snapshot':
+        send('remote:replay', { id, data: msg.data, progress: msg.progress || null });
+        return msg.exitCode == null ? undefined : send('pty:exit', { id, code: msg.exitCode });
+      case 'resync':
+      case 'restarted': return send('remote:reset', { id });
       case 'closed': return send('session:closed', { id });
       case 'lost': return send('pty:data', { id, data: LOST });
       default: return undefined;
@@ -1792,7 +1903,10 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
     sync,
     has: (id) => !!parts(id),
     isOpen: (id) => { const p = parts(id); return !!p && p.entry.snapshot.open.includes(p.projectId); },
-    list: () => onlineEntries().flatMap((e) => decorate(e.host.id, e.host.name, e.snapshot.list)),
+    list: () => [...entries.values()].flatMap((e) => {
+      const rows = decorate(e.host.id, e.host.name, e.snapshot.list);
+      return e.client.state().state === 'online' ? rows : rows.map((p) => ({ ...p, remote: { ...p.remote, offline: true } }));
+    }),
     openIds: () => onlineEntries().flatMap((e) => e.snapshot.open.map((id) => nsId(e.host.id, id))),
     git: () => {
       const out = {};
@@ -1803,6 +1917,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
     async open(id, cols, rows) {
       const p = parts(id);
       if (!p) return false;
+      if (p.entry.client.isAttached(p.projectId)) return true; // switching back to a tab: the terminal already has the screen
       try {
         if (!(await p.entry.client.request('open', { id: p.projectId, cols, rows }))) return false;
         await p.entry.client.attach(p.projectId, cols, rows);
@@ -1933,13 +2048,14 @@ const remoteHost = createRemoteHost({
   write: (id, data) => sessions.write(id, data),
   resize: (id, cols, rows) => sessions.resize(id, cols, rows),
   restart: (id, cols, rows) => sessions.restart(id, cols, rows),
-  closeSession: (id) => closeSession(id)
+  closeSession: (id) => closeSession(id),
+  log: (e) => console.log('remote control:', e.result, e.device || '')
 });
 
 const remote = createRemoteClients({
   getHosts: () => remoteCfg.hosts,
   send,
-  onChange: () => { sendProjects(); sendGitAll(); }
+  onChange: () => { sendProjectsLocal(); sendGitAll(); } // never sendProjects(): two Gremlins paired with each other would echo forever
 });
 
 function sendGitAll() {
@@ -1947,7 +2063,10 @@ function sendGitAll() {
 }
 ipcMain.handle('git:all', () => ({ ...lastAllGit, ...remote.git() }));
 
-async function applyRemoteHost() {
+// One at a time: two overlapping runs could leave a second server listening.
+let applying = Promise.resolve();
+const applyRemoteHost = () => (applying = applying.then(applyRemoteHostNow));
+async function applyRemoteHostNow() {
   await remoteHost.close();
   remoteError = '';
   if (!remoteCfg.host.enabled) return;
@@ -2006,11 +2125,14 @@ Note: `lastAllGit` is declared with `let` above this block (in `pollAllGit`'s se
 
 - [ ] **Step 4: Merge remote rows into the lists the renderer sees**
 
-Replace `sendProjects` with:
+Replace `sendProjects` with these two functions (remote changes use only the first, so a change on one computer never bounces back):
 
 ```js
-function sendProjects() {
+function sendProjectsLocal() {
   send('projects:list', { list: projectList.concat(remote.list()), open: sessions.ids().concat(remote.openIds()), active: activeId, remoteHosts: remote.hosts() });
+}
+function sendProjects() {
+  sendProjectsLocal();
   remoteHost.projectsChanged();
 }
 ```
@@ -2063,7 +2185,7 @@ ipcMain.on('pty:resize', (_e, { id, cols, rows }) => (remote.has(id) ? remote.re
 ipcMain.on('pty:restart', (_e, { id, cols, rows }) => {
   if (remote.has(id)) return remote.restart(id, cols, rows);
   if (aux.has(id)) return aux.restart(id, cols, rows);
-  remoteHost.reset(id); // a restarted session starts a fresh screen for anyone who attaches later
+  remoteHost.restarted(id); // a restarted session starts a fresh screen for everyone watching it
   sessions.restart(id, cols, rows);
 });
 ipcMain.on('session:close', (_e, { id }) => (remote.has(id) ? remote.close(id) : aux.has(id) ? aux.close(id) : closeSession(id)));
@@ -2137,20 +2259,21 @@ git commit -m "feat: wire remote host and remote clients into the main process" 
 
 **Interfaces:**
 - Consumes: the channels and payloads from Task 7.
-- Produces: `WidgetRail.withHeaders(list, hosts)`; `createRail({ ..., onHeader(hostId) })`; `terminals.reset(id)` and `terminals.write(id, data, cb)`; `tab-prefs` treats `r:` ids as temporary.
+- Produces: `WidgetRail.withHeaders(list, hosts)`; `createRail({ ..., onHeader(hostId) })`; `createTerminals({ ..., isMuted(id) })`, `terminals.reset(id)` (also clears the exited flag) and `terminals.write(id, data, cb)`; `tab-prefs` treats `r:` ids as temporary.
 
 - [ ] **Step 1: Failing test for tab-prefs**
 
-Open `test/tab-prefs.test.js`, find the existing test that checks `aux:` ids are stripped on load and save, and add this test below it (use the same `require` name the file already uses for the module; shown here as `TP`):
+Open `test/tab-prefs.test.js`, find the existing test that checks `aux:` ids are stripped on load and save, and add this test below it (use the same `require` name the file already uses for the module; shown here as `TP`). The prefs object is `{ order, pinned, names }` (see the header of `src/tab-prefs.js`):
 
 ```js
 test('remote session ids are never kept between runs, like terminal tabs', () => {
-  const prefs = { 'r:desk/p': { name: 'x', pinned: true }, 'aux:3': { name: 'y' }, 'c:\\p': { name: 'z' } };
-  assert.deepEqual(Object.keys(TP.forStorage(prefs)), ['c:\\p']);
+  const prefs = { order: ['r:desk/p', 'aux:3', 'c:\\p'], pinned: ['r:desk/p', 'c:\\p'], names: { 'r:desk/p': 'x', 'aux:3': 'y', 'c:\\p': 'z' } };
+  assert.deepEqual(TP.forStorage(prefs), { order: ['c:\\p'], pinned: ['c:\\p'], names: { 'c:\\p': 'z' } });
+  const loaded = TP.parse(JSON.stringify(prefs));
+  assert.deepEqual(loaded.order, ['c:\\p']);
+  assert.deepEqual(loaded.names, { 'c:\\p': 'z' });
 });
 ```
-
-Before writing it, read the existing tests in that file: use the real shape of `tabPrefs` and the real function names. If `forStorage` takes a different shape than a flat object, adapt the literal (not the assertion).
 
 Run: `node --test test/tab-prefs.test.js`
 Expected: the new test FAILS (the `r:` entry is kept).
@@ -2178,13 +2301,7 @@ In `src/renderer/rail.js`:
       row.addEventListener('contextmenu', (e) => { e.preventDefault(); if (!row.dataset.hostId) onMenu(row.dataset.id); });
 ```
 
-3. In `render`, add a counter and a header branch. Replace the body of `list.forEach((p, i) => {` up to and including `listEl.insertBefore` line with:
-
-```js
-      let shown = 0; // Ctrl+1..9 count projects only, not host headers
-```
-
-declared once before `list.forEach`, then inside the callback right after the `insertBefore` line:
+3. In `render`, add `let shown = 0; // Ctrl+1..9 count projects only, not host headers` on the line before `list.forEach((p, i) => {`, and insert this inside the callback, right after the `insertBefore` line:
 
 ```js
         if (p.header) {
@@ -2201,7 +2318,7 @@ declared once before `list.forEach`, then inside the callback right after the `i
         const n = shown++;
 ```
 
-and replace `${i < 9 ? ` with `${n < 9 ? `, and `(Ctrl+${i + 1})` with `(Ctrl+${n + 1})` in the `row.title` line.
+and in the `row.title` line replace `${i < 9 ? ` with `${n < 9 ? ` and `(Ctrl+${i + 1})` with `(Ctrl+${n + 1})`. After the existing `row.classList.toggle('running', ...)` line add `row.classList.toggle('offline', !!(p.remote && p.remote.offline));`.
 
 4. Add the helper above `return { render, setCollapsed };` and export it:
 
@@ -2232,8 +2349,10 @@ with:
 
 ```js
       write: (id, data, cb) => { const t = terms.get(id); if (t) t.term.write(data, cb); else if (cb) cb(); },
-      reset: (id) => { const t = terms.get(id); if (t) t.term.reset(); },
+      reset: (id) => { const t = terms.get(id); if (t) { t.exited = false; t.term.reset(); } },
 ```
+
+Also in `terminals.js`: add `isMuted = () => false` to the destructured options of `createTerminals({ widget, cfg, host, onProgress, onInput, toast, onFocus = () => {} })`, and make the first line of the `term.onData((data) => {` callback `if (isMuted(id)) return; // xterm answers terminal queries found in a replay; those answers are not typing`.
 
 - [ ] **Step 5: Renderer logic**
 
@@ -2249,7 +2368,7 @@ In `src/renderer/renderer.js`:
 
 2. At the top of `notify()` add `if (isRemote(id)) return; // phase 1: no desktop notifications for remote sessions`.
 
-3. Replace the `onProgress` option of `createTerminals` with
+3. Add `isMuted: (id) => replaying.has(id),` to the options of `createTerminals({`, and replace its `onProgress` option with
 `onProgress: (id, state, value) => { if (!replaying.has(id)) applyProgress(id, state, value); }`
 and add this function declaration just before `const terminals = ...` (move the old body into it unchanged):
 
@@ -2276,9 +2395,12 @@ and add this function declaration just before `const terminals = ...` (move the 
 ```js
   // Remote sessions: the host sends a replay of the screen on attach, and tells us about progress even while nobody is
   // attached (a terminal that exists parses progress itself, so the host's copy is only used when there is none).
-  widget.remote.onReplay(({ id, data }) => {
+  widget.remote.onReplay(({ id, data, progress }) => {
     replaying.add(id);
-    terminals.write(id, data, () => replaying.delete(id));
+    terminals.write(id, data, () => {
+      replaying.delete(id);
+      if (progress) applyProgress(id, progress.state, progress.value || 0); // where the turn is now, not what the replayed history says
+    });
   });
   widget.remote.onReset(({ id }) => terminals.reset(id));
   widget.remote.onSessionEvent(({ id, ev }) => {
@@ -2290,11 +2412,15 @@ and add this function declaration just before `const terminals = ...` (move the 
 
 6. `widget.projects.onList(({ list, open }) => {` becomes `widget.projects.onList(({ list, open, remoteHosts: hosts }) => {` and its first line gets `remoteHosts = hosts || [];`. Do the same where the startup code uses the result of `widget.projects.get()` (grep for `const initial = await widget.projects.get();`): after it add `remoteHosts = initial.remoteHosts || [];` before the first `renderRail()` that follows.
 
-7. Files pane: change `filesPane.setProject(activeId);` to `filesPane.setProject(isRemote(activeId) ? null : activeId);`. Read `files-pane.js` `setProject` first; if it does not accept `null`, make it clear the list and show a muted line "Files are not available on remote computers yet." instead of calling `widget.files.list`.
+7. Files pane: change `filesPane.setProject(activeId);` to `filesPane.setProject(isRemote(activeId) ? null : activeId);`. Read `files-pane.js` `setProject` first; if it does not accept `null` (today `setProject(null)` still runs `refresh()`, which leaves the previous project's header), make it clear the header and the list and show a muted line "Files are not available on remote computers yet." instead of calling `widget.files.list`.
 
-8. Switcher items (the `items:` line of `WidgetSwitcher.createSwitcher({` for the project switcher, near `git: [WidgetGitBadge...`): change `path: p.path,` to `path: p.remote ? p.remote.hostName : p.path,`.
+8. A failed open of a remote session says so: in `doActivate`, where `toast(`Folder missing: ${p.path}`, 2500)` follows `if (!ok) {`, use `toast(isRemote(id) ? 'Could not open that session on the other computer' : `Folder missing: ${p.path}`, 2500)`. Switcher items (the `items:` line of `WidgetSwitcher.createSwitcher({` for the project switcher, near `git: [WidgetGitBadge...`): change `path: p.path,` to `path: p.remote ? p.remote.hostName : p.path,`.
 
 9. Do not persist remote tab links: in the function containing `localStorage.setItem('tabLinks', TL.stringify(tabLinks, bottom))` (around line 349), before the setItem, drop remote ids from `tabLinks`/`bottom`. Read the function; filter every id for which `isRemote(id)` is true out of the link lists written to storage (keep them in memory).
+
+- [ ] **Step 5b: Tab labels**
+
+The spec labels remote tabs `name · hostname`. Read `makeTab` / the code that builds a project tab's label (`renderer.js`, around line 450) and, for ids where `isRemote(id)` is true, append ` · ${p.remote.hostName}` to the label and put the host name in the tab's title. Keep the rest of the label logic as is.
 
 - [ ] **Step 6: CSS**
 
@@ -2308,6 +2434,7 @@ Append to `src/renderer/styles.css`:
 .pdot.host-connecting { border: 0; background: #d6a642; animation: dot-pulse 1.2s ease-in-out infinite; }
 .pdot.host-offline, .pdot.host-error { border: 1.5px solid #8a8580; background: transparent; }
 .pdot.host-error { border-color: #e5534b; }
+.proj.offline { opacity: 0.45; }
 body.rail-collapsed .proj.rhead .pname { display: none; }
 body.rail-collapsed .proj.rhead { margin-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.08); border-radius: 0; }
 ```
@@ -2392,7 +2519,7 @@ In `settings.js`:
     sel.value = h.address;
     $('rm-status').textContent = h.error ? `Not listening: ${h.error}` : h.listening ? `Listening on ${h.boundAddress}:${h.port}. ${h.clients} connected.` : h.enabled ? 'Not listening.' : 'Off.';
     $('rm-status').className = h.error ? 'hint-block error' : 'hint-block';
-    $('rm-where').textContent = h.listening ? `${h.boundAddress}:${h.port}` : 'this computer\'s address and port';
+    $('rm-where').textContent = h.listening ? `address ${h.boundAddress} and port ${h.port}` : 'this computer\'s address and port';
     $('rm-devices').replaceChildren(...(s.devices.length ? s.devices : []).map((d) => row(d.name, `Last connected: ${when(d.lastSeen)}`, [{ label: 'Revoke', run: async () => showRemote(await host.remote.revoke(d.id)) }])));
     $('rm-hosts').replaceChildren(...(s.hosts.length ? s.hosts : []).map((x) => row(x.name, `${x.address}:${x.port} · ${{ online: 'Connected', connecting: 'Connecting…', offline: 'Not connected', error: 'Cannot connect' }[x.state] || x.state}${x.error ? ` — ${x.error}` : ''}`, [
       { label: 'Try again', run: () => { host.remote.reconnect(x.id); setTimeout(loadRemote, 600); } },
@@ -2436,7 +2563,7 @@ In `settings.js`:
 
 - [ ] **Step 3: Styles**
 
-In `settings.css` make the new section behave like the agents one: find the rule that shows `#agents` (grep `#agents`) and give `#remote` the same padding/visibility rules (`section[data-tab].on { display: block; }` already shows it). Add:
+In `settings.css` the form and the agents section share a grid cell: add `#remote` to the selector of the rule that places `#form, #agents` (about line 46, `grid-column` / `grid-row`), or the section lands in the wrong cell. Then add:
 
 ```css
 #remote { padding: 14px 18px 24px; overflow: auto; }
@@ -2484,6 +2611,9 @@ Expected: the client's host row shows "Connected"; the host's status line shows 
 6. Revoke the device in the host's Settings while connected: the client row changes to "Cannot connect" with the "rejected this pairing" message and does not retry.
 7. Ctrl+Shift+J and the Ctrl+P switcher include remote projects (the switcher row shows the host name).
 8. Restart the client: paired hosts reappear and connect; no remote tabs are restored.
+9. Pair the two instances with each other as well (each is a host and a client of the other) and change something (open a project on one): both stay quiet afterwards, with no projects traffic looping (watch CPU, or log `sendProjectsLocal` calls for a few seconds).
+10. In a remote session with a long, busy screen (run `ls -R /` or similar until it scrolls), switch to another project and back: the screen is not duplicated. Then close and reopen the client: the replay arrives before live output, with no stray characters typed into the prompt.
+11. Restart a session from the client while a second viewer is attached: the second viewer's terminal clears and the session works; restarting an exited session also clears it in the host window.
 
 Record anything that does not work and fix it before continuing.
 
@@ -2494,6 +2624,10 @@ State plainly in the hand-off that these were NOT tested: a second physical comp
 - A remote user answering a prompt does not clear the "needs you" dot in the host window.
 - Host git badges update only while the host window is visible (existing `pollAllGit` behavior).
 - Remote desktop notifications are off in phase 1.
+- Markdown links, rename, session defaults and worktree actions with a remote project active reach `main.js` with an `r:` id and quietly do nothing.
+- Saved layouts can include remote projects; applying one while the host is offline shows the dimmed row and a failed-open toast.
+- The remote project menu has only Close (restart is Ctrl+Shift+R, open is a click). The spec listed Open, Restart and Close; this is the one deliberate difference.
+- A same-size attach does not force Claude Code to redraw, so after a replay the screen is the host's last output, which is correct unless it was cut mid-sequence (the ring starts with a style reset).
 
 - [ ] **Step 5: README**
 
