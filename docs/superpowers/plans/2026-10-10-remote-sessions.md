@@ -19,7 +19,7 @@
 - Frame crypto: HKDF-SHA256 per-direction keys, AES-256-GCM, 12-byte nonce from a per-direction counter. Replayed, reordered or tampered frames close the connection.
 - Ring buffer: 262144 characters per session.
 - Remote ids look like `r:<hostId>/<projectId>`; `hostId` matches `/^[a-z0-9-]+$/`. Remote ids are never written to `tabPrefs`, `tabLinks` or restored on launch.
-- Host paths are never sent to clients, and clients send project ids only.
+- Clients send project ids only. Project ids are the host's normalized folder paths, sent only as opaque keys: the client never uses them as paths, never displays them (rows have an empty `path`), and a paired device already has shell access as the user.
 - Aux terminals (`aux:N`) stay local-only. Desktop notifications for remote sessions are NOT raised in phase 1.
 - Pure modules follow the repo pattern: no Electron imports, dependencies injected, tests in `test/*.test.js` run with `npm test`.
 - Match surrounding code style (2-space indent, single quotes, short comments that explain why).
@@ -697,7 +697,7 @@ function parseNsId(id) {
   return m ? { hostId: m[1], projectId: m[2] } : null;
 }
 
-// A host's project list as rows for the local rail: namespaced ids, and no folder paths from the other computer.
+// A host's project list as rows for the local rail: namespaced ids and an empty `path` (the host's ids are its folder paths, kept only as opaque keys).
 function decorate(hostId, hostName, projects) {
   return (projects || []).map((p) => ({
     id: nsId(hostId, p.id),
@@ -2030,7 +2030,7 @@ function startSession(id, cols, rows) {
   return true;
 }
 
-// No folder paths: a client only ever refers to projects by id.
+// Project ids are this computer's normalized folder paths, sent only as opaque keys; the client never uses or shows them as paths.
 function remoteSnapshot() {
   return {
     list: projectList.filter((p) => !p.missing).map((p) => ({ id: p.id, name: p.name, folder: p.folder, initials: p.initials, worktreeOf: p.worktreeOf || null })),

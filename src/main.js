@@ -927,7 +927,8 @@ function startSession(id, cols, rows) {
   return true;
 }
 
-// No folder paths: a client only ever refers to projects by id.
+// Project ids are this computer's normalized folder paths (list[].id, the git keys, open[]), sent only as opaque keys: the client
+// never uses them as paths or shows them, and a paired device already has shell access as the user. No separate `path` field.
 function remoteSnapshot() {
   return {
     list: projectList.filter((p) => !p.missing).map((p) => ({ id: p.id, name: p.name, folder: p.folder, initials: p.initials, worktreeOf: p.worktreeOf || null })),

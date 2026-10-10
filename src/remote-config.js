@@ -101,7 +101,8 @@ function parseNsId(id) {
   return m ? { hostId: m[1], projectId: m[2] } : null;
 }
 
-// A host's project list as rows for the local rail: namespaced ids, and no folder paths from the other computer.
+// A host's project list as rows for the local rail: namespaced ids and an empty `path`. The host's project ids are its folder paths,
+// kept only as opaque keys inside the namespaced id; nothing here uses or displays them as paths.
 function decorate(hostId, hostName, projects) {
   return (projects || []).map((p) => ({
     id: nsId(hostId, p.id),

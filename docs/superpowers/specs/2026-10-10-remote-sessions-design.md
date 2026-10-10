@@ -42,7 +42,7 @@ One JSON object per frame: `{t, id?, ...}`.
   - `attach {sessionId, cols, rows}` returns the ring-buffer contents, then live `data` events follow.
   - `detach`, `input {sessionId, data}`, `resize {sessionId, cols, rows}`, `restart`, `close`.
 - Events are pushed by the host: `data`, `exit`, `status {sessionId, state}`, `git`, `projects`.
-- Clients send project ids only; host paths are never acted on by the client.
+- Clients send project ids only. Project ids are the host's normalized folder paths, sent only as opaque keys: the client never uses them as paths, never displays them (rows have an empty `path`), and a paired device already has shell access as the user.
 
 ## Host side
 
