@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert');
-const { renderMarkdown, altTextForImages, resolveRelativeLink } = require('../src/md-render');
+const { renderMarkdown, resolveRelativeLink, isSafeHref, allowedAttr, ALLOWED_TAGS, DROP_TAGS, ALLOWED_ATTRS } = require('../src/md-render');
 
 test('renderMarkdown strips YAML front matter and renders GFM', () => {
   const html = renderMarkdown('---\ntitle: x\n---\n# Hi\n\n| a |\n|---|\n| b |\n');
@@ -11,13 +11,6 @@ test('renderMarkdown strips YAML front matter and renders GFM', () => {
 
 test('renderMarkdown handles CRLF front matter', () => {
   assert.ok(!renderMarkdown('---\r\na: 1\r\n---\r\ntext').includes('a: 1'));
-});
-
-test('altTextForImages replaces images with their alt text', () => {
-  const html = altTextForImages(renderMarkdown('![Logo](img/logo.png) and <img src="https://x/y.png">'));
-  assert.ok(!/<img/i.test(html));
-  assert.ok(html.includes('[Logo]'));
-  assert.ok(html.includes('[image]'));
 });
 
 test('resolveRelativeLink resolves against the document folder', () => {
@@ -36,34 +29,50 @@ test('resolveRelativeLink refuses anything outside the project or odd', () => {
   assert.strictEqual(resolveRelativeLink(null, 'a.md'), null);
 });
 
-const { sanitizeRemoteHtml } = require('../src/md-render');
-
-test('sanitizeRemoteHtml removes tags and attributes that load or navigate', () => {
-  const hostile = [
-    '<input type="image" src="https://evil.test/a.png">',
-    '<video poster="https://evil.test/p.png"><source src="https://evil.test/v.mp4"></video>',
-    '<svg><image href="https://evil.test/i.png"/></svg>',
-    '<div style="background:url(https://evil.test/b.png)">x</div>',
-    '<style>body{background:url(file://evil/share/x.png)}</style>',
-    '<meta http-equiv="refresh" content="0;url=http://evil.test/">',
-    '<iframe src="https://evil.test/"></iframe>',
-    '<object data="https://evil.test/o"></object><embed src="https://evil.test/e">',
-    '<form action="https://evil.test/"><button>go</button></form>',
-    '<link rel="stylesheet" href="https://evil.test/c.css"><base href="https://evil.test/">',
-    '<a href="javascript:alert(1)">x</a>',
-    '<a href="  JaVa\tScRiPt:alert(1)">x</a>',
-    '<a href="&#106;avascript:alert(1)">x</a>',
-    '<img srcset="https://evil.test/a.png 1x" onerror="x()">',
-    '<script>alert(1)</script>'
-  ].join('\n');
-  const out = sanitizeRemoteHtml(hostile);
-  assert.ok(!/evil/i.test(out), out);
-  assert.ok(!/<(meta|iframe|object|embed|form|link|base|style|script|svg|video|input)\b/i.test(out), out);
-  assert.ok(!/javascript:|onerror|style=|srcset|poster/i.test(out), out);
+test('isSafeHref accepts #fragments, relative paths and http(s)', () => {
+  for (const h of ['#frag', 'docs/a.md', '../x.md', './a', '/root/a.md', 'a.md?x=1&y=2', 'https://example.com/x?a=1&b=2', 'HTTP://x.test', 'mailto-ish/ok']) {
+    assert.strictEqual(isSafeHref(h), true, h);
+  }
 });
 
-test('sanitizeRemoteHtml leaves ordinary Markdown output alone', () => {
-  const html = renderMarkdown('# T\n\n- [x] done\n- b\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```js\nconst a = "<b>";\n```\n\n[ok](docs/a.md) [web](https://example.com/x?y=1) `code`\n');
-  assert.strictEqual(sanitizeRemoteHtml(html), html);
-  assert.ok(sanitizeRemoteHtml(altTextForImages(renderMarkdown('![Logo](a.png)'))).includes('[Logo]'));
+test('isSafeHref refuses other schemes, obfuscation, UNC and protocol-relative links', () => {
+  for (const h of ['javascript:alert(1)', 'JaVa\tScRiPt:alert(1)', ' java\0script:x', 'java\nscript:x', '&#106;avascript:x', 'javascript&colon;x',
+    'vbscript:x', 'data:text/html,<b>', 'file://evil/share/x', 'file:///c:/x', '//host/x', '\\\\host\\share', '/\\host/x', 'a\\b', 'ftp://x', '', '   ', null, 5,
+    'x'.repeat(3000)]) {
+    assert.strictEqual(isSafeHref(h), false, String(h));
+  }
+});
+
+test('allowedAttr copies only the listed attributes', () => {
+  assert.strictEqual(allowedAttr('a', 'href', 'docs/a.md'), 'docs/a.md');
+  assert.strictEqual(allowedAttr('a', 'href', 'javascript:x'), null);
+  assert.strictEqual(allowedAttr('div', 'href', 'a.md'), null);
+  assert.strictEqual(allowedAttr('div', 'style', 'background:url(http://x)'), null);
+  assert.strictEqual(allowedAttr('img', 'src', 'http://x'), null);
+  assert.strictEqual(allowedAttr('a', 'onclick', 'x()'), null);
+  assert.strictEqual(allowedAttr('video', 'poster', 'http://x'), null);
+  assert.strictEqual(allowedAttr('p', 'title', 'hi'), 'hi');
+  assert.strictEqual(allowedAttr('h2', 'id', 'setup'), 'setup');
+  assert.strictEqual(allowedAttr('p', 'id', 'setup'), null);
+  assert.strictEqual(allowedAttr('code', 'class', 'language-js'), 'language-js');
+  assert.strictEqual(allowedAttr('code', 'class', 'language-js x'), null);
+  assert.strictEqual(allowedAttr('p', 'class', 'language-js'), null);
+  assert.strictEqual(allowedAttr('td', 'align', 'CENTER'), 'center');
+  assert.strictEqual(allowedAttr('td', 'align', 'expression(x)'), null);
+  assert.strictEqual(allowedAttr('ol', 'start', '3'), '3');
+  assert.strictEqual(allowedAttr('ol', 'start', 'x'), null);
+  assert.strictEqual(allowedAttr('input', 'type', 'checkbox'), 'checkbox');
+  assert.strictEqual(allowedAttr('input', 'type', 'image'), null);
+  assert.strictEqual(allowedAttr('input', 'src', 'http://x'), null);
+  assert.strictEqual(allowedAttr('input', 'checked', ''), '');
+});
+
+test('the tables keep dangerous tags out of the allowlist', () => {
+  for (const t of ['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta', 'base', 'form', 'svg', 'math', 'video', 'audio', 'source', 'template', 'noscript', 'textarea', 'select', 'button']) {
+    assert.ok(DROP_TAGS.includes(t), t);
+    assert.ok(!ALLOWED_TAGS.includes(t), t);
+  }
+  for (const t of ['h1', 'p', 'a', 'table', 'td', 'pre', 'code', 'li', 'input', 'details', 'summary']) assert.ok(ALLOWED_TAGS.includes(t), t);
+  assert.ok(!ALLOWED_TAGS.includes('img'));
+  for (const list of Object.values(ALLOWED_ATTRS)) for (const a of list) assert.ok(!/^(style|src|srcset|poster|on)/.test(a), a);
 });

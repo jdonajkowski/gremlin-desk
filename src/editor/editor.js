@@ -22,7 +22,7 @@
     if (doc.error) return setStatus(`Could not read the file: ${doc.error}`, true);
 
     const readOnly = doc.readOnly === true; // a copy from another computer: nothing to save, no file to open in VS Code
-    document.title = readOnly ? `${doc.name} · ${(doc.banner || '').replace(/^Read-only copy from /, '')} (read-only)` : doc.name;
+    document.title = readOnly ? `${doc.name} · ${doc.hostName || ''} (read-only)` : doc.name;
     $('path').textContent = doc.file;
     $('path').title = doc.file;
     if (readOnly) {

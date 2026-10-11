@@ -26,7 +26,7 @@ const gitOps = require('./git-ops');
 const projectRename = require('./project-rename');
 const { searchProject } = require('./search');
 const { createFileService } = require('./remote-files');
-const { renderMarkdown, altTextForImages, sanitizeRemoteHtml, resolveRelativeLink } = require('./md-render');
+const { renderMarkdown, resolveRelativeLink } = require('./md-render');
 const { createSampler } = require('./sysmon');
 const { setupWorkbench } = require('./workbench-main');
 const { buildLaunch } = require('./sessions');
@@ -1025,6 +1025,7 @@ ipcMain.handle('remote:addHost', (_e, form) => {
 });
 ipcMain.handle('remote:removeHost', (_e, { id } = {}) => {
   saveRemote(remoteConfig.removeHost(remoteCfg, id));
+  remoteToasted.delete(id);
   remote.sync();
   return remoteState();
 });
@@ -1225,7 +1226,7 @@ ipcMain.handle('editor:get', (ev) => {
   if (!e) return null;
   if (e.remote) {
     const { hostName, rel, text, line } = e.remote;
-    return { file: `${hostName}: ${rel}`, name: baseName(rel), text, line, readOnly: true, banner: `Read-only copy from ${hostName}`, fontFamily: config.fontFamily, fontSize: config.fontSize };
+    return { file: `${hostName}: ${rel}`, name: baseName(rel), text, line, readOnly: true, hostName, banner: `Read-only copy from ${hostName}`, fontFamily: config.fontFamily, fontSize: config.fontSize };
   }
   try {
     const { text, bom } = readForEdit(e.file);
@@ -1295,7 +1296,7 @@ function remoteMdDoc(id, rel, hostName, res) {
   const doc = { file: `${hostName}: ${rel}`, dir: null, remote: { hostName, id, rel } };
   const problem = remoteProblem(res);
   if (problem) return { ...doc, error: problem };
-  return { ...doc, html: sanitizeRemoteHtml(altTextForImages(renderMarkdown(res.text))) };
+  return { ...doc, html: renderMarkdown(res.text) }; // the popout rebuilds it from an allowlist (md.js)
 }
 
 function showWindow(w) {

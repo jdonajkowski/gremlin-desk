@@ -15,8 +15,38 @@
     locked = true;
     const meta = document.createElement('meta');
     meta.httpEquiv = 'Content-Security-Policy';
-    meta.content = "default-src 'none'; img-src data:; style-src 'self'; script-src 'self'; font-src 'self' data:; form-action 'none'; base-uri 'none'";
+    // No 'self' source: on a file: page it would match file: URLs (including network shares). The page's own script and
+    // stylesheet are already loaded, and a policy is only checked when something is fetched.
+    meta.content = "default-src 'none'; img-src data:; form-action 'none'; base-uri 'none'";
     document.head.appendChild(meta);
+  }
+
+  // A remote document's HTML is parsed inertly (nothing loads or runs) and rebuilt in this page from an allowlist
+  // (src/md-render.js): the parsed nodes are never moved into the live document.
+  function safeFragment(html) {
+    const R = window.MdRender;
+    const dom = new DOMParser().parseFromString(html, 'text/html');
+    const frag = document.createDocumentFragment();
+    const copy = (from, into) => {
+      for (const n of from.childNodes) {
+        if (n.nodeType === Node.TEXT_NODE) { into.appendChild(document.createTextNode(n.data)); continue; }
+        if (n.nodeType !== Node.ELEMENT_NODE) continue;
+        const tag = n.localName.toLowerCase();
+        if (R.DROP_TAGS.includes(tag)) continue;
+        if (tag === 'img') { into.appendChild(document.createTextNode(`[${n.getAttribute('alt') || 'image'}]`)); continue; }
+        if (!R.ALLOWED_TAGS.includes(tag)) { copy(n, into); continue; } // unknown: keep what is inside
+        if (tag === 'input' && R.allowedAttr(tag, 'type', n.getAttribute('type') || '') !== 'checkbox') continue;
+        const el = document.createElement(tag);
+        for (const a of n.attributes) {
+          const v = R.allowedAttr(tag, a.name, a.value);
+          if (v !== null) el.setAttribute(a.name.toLowerCase(), v);
+        }
+        copy(n, el);
+        into.appendChild(el);
+      }
+    };
+    copy(dom.body, frag);
+    return frag;
   }
 
   window.mdView.onRender((doc) => {
@@ -38,7 +68,8 @@
     // Relative image paths resolve against the Markdown file's folder.
     if (doc.dir) baseEl.href = fileUrl(doc.dir);
     const scroll = document.scrollingElement.scrollTop;
-    docEl.innerHTML = doc.html;
+    if (doc.remote) docEl.replaceChildren(safeFragment(String(doc.html)));
+    else docEl.innerHTML = doc.html;
     document.scrollingElement.scrollTop = scroll; // keep the place on live reloads
   });
 
