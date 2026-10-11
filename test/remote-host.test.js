@@ -451,7 +451,7 @@ test('projectsChanged: a client that connected while the list was Y still hears 
   await s.host.close();
 });
 
-const waitFor = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); };
+const waitFor = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); if (!cond()) throw new Error('waitFor: condition never became true'); };
 
 function fakeFiles(over = {}) {
   const calls = [];
@@ -505,14 +505,12 @@ test('files: arguments of the wrong type are refused before the service is calle
   const bad = [{ id: 5 }, { id: {} }, { id: null }, {}, { id: [] }, { id: 'p1', rel: 5 }, { id: 'p1', rel: {} }, { id: 'p1', rel: [] }, { id: 'p1', rel: null }, { id: 'p1', rel: ['x'.repeat(200000)], extra: 'y'.repeat(100000) }];
   for (const t of ['files.list', 'files.read', 'files.git']) {
     for (const args of bad) {
-      if (t === 'files.git' && typeof args.id === 'string' && args.rel === undefined) continue;
       if (t === 'files.git' && typeof args.id === 'string') continue; // git ignores rel
       const r = await c.request(t, args);
       assert.equal(r.ok, false, t + ' ' + JSON.stringify(args).slice(0, 40));
-      assert.equal(typeof r.error, 'string');
+      assert.equal(r.error, 'That request is not valid');
     }
   }
-  assert.deepEqual(fs.calls.filter((x) => x[1] !== 'p1' || (x[2] !== undefined && typeof x[2] !== 'string')), [], 'hostile shapes never reached the service');
   assert.equal(fs.calls.length, 0);
   assert.equal((await c.request('files.git', { id: 'p1' })).ok, true, 'the connection still works');
   assert.equal(c.closed, false);
