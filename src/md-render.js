@@ -16,6 +16,28 @@ function altTextForImages(html) {
   });
 }
 
+// Raw HTML in a remote document is untrusted: drop everything that can fetch, navigate or submit (the popout's CSP is the
+// second line of defence). Ordinary Markdown output has none of these, so it passes through unchanged.
+const DROP_WITH_CONTENT = 'script|style|iframe|object|form|svg|math|video|audio|noscript|template|frameset|frame|applet|canvas';
+const DROP_TAG = `${DROP_WITH_CONTENT}|meta|link|base|embed|source|track|param|image|picture`;
+const ATTR_VALUE = '"[^"]*"|\'[^\']*\'|[^\\s>]*';
+const BAD_ATTR = new RegExp(`\\s(?:style|src|srcset|poster|background|formaction|action|ping|data|xlink:href|on[a-z]+)\\s*=\\s*(?:${ATTR_VALUE})`, 'gi');
+const HREF_ATTR = new RegExp(`\\shref\\s*=\\s*(${ATTR_VALUE})`, 'gi');
+
+function sanitizeRemoteHtml(html) {
+  return String(html)
+    .replace(new RegExp(`<(${DROP_WITH_CONTENT})\\b[\\s\\S]*?<\\/\\1\\s*>`, 'gi'), '')
+    .replace(new RegExp(`<\\/?(?:${DROP_TAG})\\b(?:"[^"]*"|'[^']*'|[^'">])*>`, 'gi'), '')
+    .replace(/<([a-z][a-z0-9-]*)\b((?:"[^"]*"|'[^']*'|[^'">])*)>/gi, (m, tag, attrs) => {
+      if (/^input$/i.test(tag) && /\btype\s*=\s*["']?image/i.test(attrs)) return '';
+      const a = attrs.replace(BAD_ATTR, '').replace(HREF_ATTR, (whole, v) => {
+        const val = v.replace(/^["']|["']$/g, '').replace(/[\s\x00-\x20]+/g, '');
+        return /^(javascript|vbscript|data):/i.test(val) || /^[^/#?]*&(#|colon)/i.test(val) ? '' : whole;
+      });
+      return a === attrs ? m : `<${tag}${a}>`;
+    });
+}
+
 // A link clicked in a remote document -> a project-relative Markdown path, or null. The target is resolved against the
 // document's folder and must stay inside the project; anything with a scheme, a drive letter or a backslash is refused.
 function resolveRelativeLink(fromRel, href) {
@@ -29,4 +51,4 @@ function resolveRelativeLink(fromRel, href) {
   return rel;
 }
 
-module.exports = { renderMarkdown, altTextForImages, resolveRelativeLink };
+module.exports = { renderMarkdown, altTextForImages, sanitizeRemoteHtml, resolveRelativeLink };

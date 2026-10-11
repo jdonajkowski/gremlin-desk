@@ -102,6 +102,7 @@
       if (query) return renderSearch();
       const seq = ++renderSeq;
       const frag = document.createDocumentFragment();
+      let failed = false; // the project folder itself could not be listed (a remote host that is offline)
       if (!projectId) {
         headEl.textContent = 'Files';
         headEl.title = '';
@@ -109,7 +110,7 @@
         const dirs = openDirs();
         const walk = async (rel, depth) => {
           const entries = await load(rel);
-          if (!entries) return;
+          if (!entries) { if (!depth) failed = true; return; }
           for (const e of entries) {
             frag.appendChild(row(e, depth));
             if (e.dir && dirs.has(e.rel)) await walk(e.rel, depth + 1);
@@ -118,7 +119,7 @@
         await walk('', 0);
       }
       if (seq !== renderSeq) return; // a newer render started meanwhile
-      swapIn(frag, projectId ? 'Empty folder' : notice || 'No project open');
+      swapIn(frag, projectId ? (failed && String(projectId).startsWith('r:') ? 'Could not list the files. Try refresh.' : 'Empty folder') : notice || 'No project open');
     }
 
     // --- Search ------------------------------------------------------------------------------------

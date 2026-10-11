@@ -7,7 +7,20 @@
 
   const fileUrl = (dir) => 'file:///' + dir.replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/').replace(/^([A-Za-z])%3A/, '$1:') + '/';
 
+  // A document from another computer is untrusted: before its first content, tighten the policy (a second policy only ever
+  // adds restrictions). No images except data:, no inline styles, nothing that can reach the network or a file share.
+  let locked = false;
+  function lockDown() {
+    if (locked) return;
+    locked = true;
+    const meta = document.createElement('meta');
+    meta.httpEquiv = 'Content-Security-Policy';
+    meta.content = "default-src 'none'; img-src data:; style-src 'self'; script-src 'self'; font-src 'self' data:; form-action 'none'; base-uri 'none'";
+    document.head.appendChild(meta);
+  }
+
   window.mdView.onRender((doc) => {
+    if (doc.remote) lockDown();
     current = doc;
     // A document from another computer: no file to edit or open here, only Reload; its images cannot load.
     for (const id of ['btn-edit', 'btn-vscode']) document.getElementById(id).hidden = !!doc.remote;

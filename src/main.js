@@ -26,7 +26,7 @@ const gitOps = require('./git-ops');
 const projectRename = require('./project-rename');
 const { searchProject } = require('./search');
 const { createFileService } = require('./remote-files');
-const { renderMarkdown, altTextForImages, resolveRelativeLink } = require('./md-render');
+const { renderMarkdown, altTextForImages, sanitizeRemoteHtml, resolveRelativeLink } = require('./md-render');
 const { createSampler } = require('./sysmon');
 const { setupWorkbench } = require('./workbench-main');
 const { buildLaunch } = require('./sessions');
@@ -1268,6 +1268,14 @@ const baseName = (rel) => String(rel).split('/').pop() || String(rel);
 const remoteKey = (id, rel) => `r:${id}\0${rel}`;
 const remoteViewOf = (sender) => { const w = BrowserWindow.fromWebContents(sender); return w && !w.isDestroyed() && w.mdRemote ? w : null; };
 
+// A host that stays offline would toast on every refresh: say each error once per host until a request succeeds again.
+const remoteToasted = new Map(); // host id -> last error shown
+const hostOf = (id) => (remoteConfig.parseNsId(id) || {}).hostId;
+function toastOnce(id, msg) {
+  const h = hostOf(id);
+  if (remoteToasted.get(h) !== msg) { remoteToasted.set(h, msg); send('toast', msg); }
+}
+
 function hostNameOf(id) {
   const p = remoteConfig.parseNsId(id);
   const h = p && remote.hosts().find((x) => x.id === p.hostId);
@@ -1287,7 +1295,7 @@ function remoteMdDoc(id, rel, hostName, res) {
   const doc = { file: `${hostName}: ${rel}`, dir: null, remote: { hostName, id, rel } };
   const problem = remoteProblem(res);
   if (problem) return { ...doc, error: problem };
-  return { ...doc, html: altTextForImages(renderMarkdown(res.text)) };
+  return { ...doc, html: sanitizeRemoteHtml(altTextForImages(renderMarkdown(res.text))) };
 }
 
 function showWindow(w) {
@@ -1338,7 +1346,7 @@ function openRemoteEditor(id, rel, text, line) {
   if (existing && !existing.win.isDestroyed()) {
     existing.remote.text = text;
     existing.remote.line = line;
-    existing.win.webContents.send('editor:changed', text); // a fresh copy replaces the old one
+    existing.win.webContents.send('editor:remote', { text, line }); // a fresh copy replaces the old one, quietly
     return showWindow(existing.win);
   }
   const ed = new BrowserWindow({
@@ -1369,6 +1377,7 @@ async function openRemoteFile(id, rel, line) {
   if (typeof rel !== 'string') return;
   const res = await remote.filesRead(id, rel);
   const problem = remoteProblem(res);
+  if (!(res && res.error)) remoteToasted.delete(hostOf(id));
   if (problem) return send('toast', problem);
   if (res.kind === 'md') openRemoteMd(id, rel, res);
   else openRemoteEditor(id, rel, res.text, Number(line) > 0 ? Number(line) : undefined);
@@ -1417,7 +1426,8 @@ ipcMain.on('files:setOpen', (_e, open) => {
 ipcMain.handle('files:list', async (_e, { id, rel }) => {
   if (remote.has(id)) {
     const r = await remote.filesList(id, rel);
-    if (!r || r.error || !Array.isArray(r.entries)) { send('toast', (r && r.error) || 'The request failed'); return null; }
+    if (!r || r.error || !Array.isArray(r.entries)) { toastOnce(id, (r && r.error) || 'The request failed'); return null; }
+    remoteToasted.delete(hostOf(id));
     return { root: '', entries: r.entries };
   }
   const root = projectPath(id);

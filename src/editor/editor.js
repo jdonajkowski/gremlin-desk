@@ -22,7 +22,7 @@
     if (doc.error) return setStatus(`Could not read the file: ${doc.error}`, true);
 
     const readOnly = doc.readOnly === true; // a copy from another computer: nothing to save, no file to open in VS Code
-    document.title = readOnly ? `${doc.name} (read-only)` : doc.name;
+    document.title = readOnly ? `${doc.name} · ${(doc.banner || '').replace(/^Read-only copy from /, '')} (read-only)` : doc.name;
     $('path').textContent = doc.file;
     $('path').title = doc.file;
     if (readOnly) {
@@ -119,6 +119,14 @@
       } else {
         diskText = text;
         $('banner').hidden = false;
+      }
+    });
+    // A read-only copy that was opened again: the fresh text replaces the old one without the "reloaded from disk" talk.
+    host.onRemote(({ text, line }) => {
+      if (typeof text === 'string' && text !== model.getValue()) applyDisk(text);
+      if (line > 0) {
+        editor.setPosition({ lineNumber: line, column: 1 });
+        editor.revealLineInCenter(line);
       }
     });
     $('btn-reload').onclick = () => { if (diskText !== null) applyDisk(diskText); editor.focus(); };
