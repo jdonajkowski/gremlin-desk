@@ -2,6 +2,7 @@
 // module is the only place those requests touch the disk, so the path rules live here. Pure: fs, path and the
 // helpers are injected so tests can use real temp folders.
 const MAX_VIEW_BYTES = 2 * 1024 * 1024;
+const MAX_REPLY_JSON = 4 * 1024 * 1024; // a text reply is JSON-escaped, sealed and base64'd: it has to stay under the client's line limit
 const MAX_ENTRIES = 2000;
 const MAX_REL = 1024;
 const MD = /\.(md|markdown)$/i;
@@ -85,7 +86,9 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
       if (n > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
       const bytes = buf.subarray(0, n);
       if (bytes.subarray(0, 8192).includes(0)) return { ...head, kind: 'binary' };
-      return { ...head, kind: MD.test(name) ? 'md' : 'text', text: bytes.toString('utf8').replace(/^\ufeff/, '') };
+      const text = bytes.toString('utf8').replace(/^\ufeff/, '');
+      if (Buffer.byteLength(JSON.stringify(text)) > MAX_REPLY_JSON) return { ...head, kind: 'toolarge' };
+      return { ...head, kind: MD.test(name) ? 'md' : 'text', text };
     } catch {
       return { error: 'Not found' };
     } finally {
@@ -104,4 +107,4 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
   return { list, read, git };
 }
 
-module.exports = { createFileService, MAX_VIEW_BYTES, MAX_ENTRIES, MAX_REL };
+module.exports = { createFileService, MAX_VIEW_BYTES, MAX_REPLY_JSON, MAX_ENTRIES, MAX_REL };

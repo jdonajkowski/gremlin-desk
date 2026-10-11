@@ -4,7 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const files = require('../src/files');
-const { createFileService, MAX_VIEW_BYTES, MAX_ENTRIES } = require('../src/remote-files');
+const { createFileService, MAX_VIEW_BYTES, MAX_REPLY_JSON, MAX_ENTRIES } = require('../src/remote-files');
+const C = require('../src/remote-crypto');
 
 function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rfiles-'));
@@ -240,4 +241,29 @@ test('read: a file that keeps growing past fstat is reported toolarge, never rea
   assert.equal(r.kind, 'toolarge');
   assert.equal(r.text, undefined);
   assert.ok(requested <= MAX_VIEW_BYTES + 1, 'never more than the cap + 1 bytes are requested');
+});
+
+test('read: text whose JSON-escaped form is over the reply cap is toolarge', () => {
+  const { svc, root } = setup();
+  fs.writeFileSync(path.join(root, 'ctl.txt'), Buffer.alloc(1536 * 1024, 1));
+  const r = svc.read('p1', 'ctl.txt');
+  assert.equal(r.kind, 'toolarge');
+  assert.equal(r.text, undefined);
+  fs.writeFileSync(path.join(root, 'edge.txt'), 'x'.repeat(MAX_VIEW_BYTES));
+  assert.equal(svc.read('p1', 'edge.txt').kind, 'text', 'exactly at the view limit still shows');
+  fs.writeFileSync(path.join(root, 'uni.txt'), 'héllo wörld ✓ 日本語\n'.repeat(60000).slice(0, 1.9 * 1024 * 1024 / 2));
+  assert.equal(svc.read('p1', 'uni.txt').kind, 'text');
+});
+
+test('read: the largest text that is returned fits in one sealed line', () => {
+  const { svc, root } = setup();
+  const k = C.deriveKeys('s'.repeat(64), C.newNonce(), C.newNonce());
+  const ch = C.createChannel(k.s2c, k.c2s);
+  // control bytes expand 6x when escaped: find a size that is just under the reply cap
+  const n = Math.floor(MAX_REPLY_JSON / 6);
+  fs.writeFileSync(path.join(root, 'ctl.txt'), Buffer.alloc(n, 1));
+  const r = svc.read('p1', 'ctl.txt');
+  assert.equal(r.kind, 'text');
+  assert.ok(Buffer.byteLength(JSON.stringify(r.text)) <= MAX_REPLY_JSON);
+  assert.ok(ch.seal({ t: 'res', ok: true, data: r }).length < C.MAX_LINE);
 });
