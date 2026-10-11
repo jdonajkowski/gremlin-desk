@@ -4,7 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const files = require('../src/files');
-const { createFileService, MAX_VIEW_BYTES, MAX_REPLY_JSON, MAX_ENTRIES } = require('../src/remote-files');
+const { createFileService, MAX_VIEW_BYTES, MAX_REPLY_JSON, MAX_ENTRIES, SEARCH_MS } = require('../src/remote-files');
+const { searchProject } = require('../src/search');
 const C = require('../src/remote-crypto');
 
 function setup() {
@@ -266,4 +267,154 @@ test('read: the largest text that is returned fits in one sealed line', () => {
   assert.equal(r.kind, 'text');
   assert.ok(Buffer.byteLength(JSON.stringify(r.text)) <= MAX_REPLY_JSON);
   assert.ok(ch.seal({ t: 'res', ok: true, data: r }).length < C.MAX_LINE);
+});
+
+// --- search, searchAll, resolveMd ---
+
+function searchSetup(extra = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rsearch-'));
+  const mk = (name) => {
+    const root = path.join(dir, name);
+    fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'node_modules'), { recursive: true });
+    return root;
+  };
+  const root = mk('proj');
+  const root2 = mk('proj2');
+  fs.writeFileSync(path.join(root, 'notes.txt'), 'Hello world\nhello again\nliteral a.*b here\naxxb not this\n');
+  fs.writeFileSync(path.join(root, 'docs', 'guide.md'), '# Guide\nhello from the guide\n');
+  fs.writeFileSync(path.join(root, 'node_modules', 'skip.txt'), 'hello hidden\n');
+  fs.writeFileSync(path.join(root2, 'other.txt'), 'hello two\n');
+  fs.writeFileSync(path.join(dir, 'outside.md'), '# Outside\n');
+  const roots = { p1: root, p2: root2 };
+  const list = [
+    { id: 'p1', name: 'One', path: root, missing: false },
+    { id: 'gone', name: 'Gone', path: path.join(dir, 'gone'), missing: true },
+    { id: 'p2', name: 'Two', path: root2, missing: false }
+  ];
+  const svc = createFileService({
+    fs, path, files, projectRoot: (id) => roots[id] || null,
+    searchProject, projects: () => list, mdFiles: files.mdFiles, findByTail: files.findByTail, ...extra
+  });
+  return { dir, root, root2, svc, list };
+}
+
+test('search: literal matches with rel, line and text; case option respected', async () => {
+  const { svc } = searchSetup();
+  const r = await svc.search('p1', 'hello', {}, () => false);
+  assert.equal(r.truncated, false);
+  const notes = r.hits.find((h) => h.rel === 'notes.txt');
+  assert.deepEqual(notes.matches, [{ line: 1, text: 'Hello world' }, { line: 2, text: 'hello again' }]);
+  assert.ok(r.hits.some((h) => h.rel === 'docs/guide.md'));
+  assert.ok(!r.hits.some((h) => h.rel.startsWith('node_modules')), 'ignored folders are skipped');
+  const cs = await svc.search('p1', 'hello', { caseSensitive: true }, () => false);
+  assert.deepEqual(cs.hits.find((h) => h.rel === 'notes.txt').matches, [{ line: 2, text: 'hello again' }]);
+  const names = await svc.search('p1', 'guide', {}, () => false);
+  assert.deepEqual(names.files, [{ rel: 'docs/guide.md' }]);
+});
+
+test('search: a regex-looking query is searched literally', async () => {
+  const { svc } = searchSetup();
+  const r = await svc.search('p1', 'a.*b', {}, () => false);
+  assert.deepEqual(r.hits, [{ rel: 'notes.txt', matches: [{ line: 3, text: 'literal a.*b here' }] }]);
+  const r2 = await svc.search('p1', 'a.*b', { regex: true }, () => false);
+  assert.deepEqual(r2.hits, r.hits, 'a regex option is ignored');
+});
+
+test('search: empty, non-string and too-long queries are refused', async () => {
+  const { svc } = searchSetup();
+  for (const q of ['', undefined, null, 5, {}, ['hello'], 'x'.repeat(201)]) {
+    assert.deepEqual(await svc.search('p1', q, {}, () => false), { error: 'Enter something to search for' }, JSON.stringify(q));
+    assert.deepEqual(await svc.searchAll(q, () => false), { error: 'Enter something to search for' }, JSON.stringify(q));
+  }
+  assert.ok(!(await svc.search('p1', 'x'.repeat(200), {}, () => false)).error, '200 characters is fine');
+});
+
+test('search: unknown project is refused', async () => {
+  const { svc } = searchSetup();
+  for (const id of ['nope', '', undefined, 5]) assert.deepEqual(await svc.search(id, 'hello', {}, () => false), { error: 'That project is not available' });
+});
+
+test('search: cancellation mid-way and the time budget', async () => {
+  const { svc } = searchSetup();
+  let calls = 0;
+  assert.deepEqual(await svc.search('p1', 'hello', {}, () => ++calls > 1), { cancelled: true });
+  calls = 0;
+  assert.deepEqual(await svc.searchAll('hello', () => ++calls > 1), { cancelled: true });
+  let t = 1000;
+  const late = searchSetup({ now: () => { const v = t; t += 25000; return v; } }).svc;
+  const r = await late.search('p1', 'hello', {}, () => false);
+  assert.equal(r.truncated, true);
+  assert.ok(Array.isArray(r.files) && Array.isArray(r.hits));
+  t = 1000;
+  const all = await late.searchAll('hello', () => false);
+  assert.ok(Array.isArray(all.rows), 'the budget ends searchAll with the rows found so far');
+  assert.equal(SEARCH_MS, 20000);
+});
+
+test('searchAll: rows from every non-missing project, mapped like the local search', async () => {
+  const { svc, root } = searchSetup();
+  const r = await svc.searchAll('hello', () => false);
+  assert.ok(r.rows.every((x) => x.id === 'p1' || x.id === 'p2'));
+  assert.ok(!r.rows.some((x) => x.id === 'gone'));
+  assert.deepEqual(r.rows.find((x) => x.id === 'p2'), { id: 'p2', project: 'Two', rel: 'other.txt', line: 1, text: 'hello two' });
+  for (let i = 0; i < 8; i++) fs.writeFileSync(path.join(root, `hello${i}.txt`), 'nothing\n');
+  fs.writeFileSync(path.join(root, 'zz.txt'), 'one hello\ntwo hello\nthree hello\nfour hello\n');
+  const m = await svc.searchAll('hello', () => false);
+  const nameRows = m.rows.filter((x) => x.id === 'p1' && x.line === 0);
+  assert.equal(nameRows.length, 5, 'first 5 file name matches');
+  assert.ok(nameRows.every((x) => x.text === '' && x.project === 'One'));
+  assert.ok(m.rows.findIndex((x) => x.line > 0 && x.id === 'p1') > m.rows.findLastIndex((x) => x.line === 0 && x.id === 'p1'), 'names come before content rows');
+  assert.equal(m.rows.filter((x) => x.id === 'p1' && x.rel === 'zz.txt' && x.line > 0).length, 3, 'first 3 matches of a hit');
+});
+
+test('searchAll: at most 200 rows', async () => {
+  const many = Array.from({ length: 50 }, (_, i) => ({ id: `q${i}`, name: `Q${i}`, path: `/q${i}`, missing: false }));
+  const fake = async () => ({ files: [{ rel: 'a' }, { rel: 'b' }], hits: [{ rel: 'c', matches: [{ line: 1, col: 0, text: 'x' }, { line: 2, col: 0, text: 'y' }, { line: 3, col: 0, text: 'z' }, { line: 4, col: 0, text: 'w' }] }], truncated: false });
+  const svc = createFileService({ fs, path, files, projectRoot: () => null, searchProject: fake, projects: () => many });
+  const r = await svc.searchAll('x', () => false);
+  assert.equal(r.rows.length, 200);
+  assert.deepEqual(r.rows[0], { id: 'q0', project: 'Q0', rel: 'a', line: 0, text: '' });
+  assert.deepEqual(r.rows[2], { id: 'q0', project: 'Q0', rel: 'c', line: 1, text: 'x' });
+  assert.equal(r.rows[5].id, 'q1');
+});
+
+test('resolveMd: relative, bare name, absolute inside; first resolving candidate wins', () => {
+  const { svc, root } = searchSetup();
+  assert.deepEqual(svc.resolveMd('p1', ['docs/guide.md']), { index: 0, rel: 'docs/guide.md' });
+  assert.deepEqual(svc.resolveMd('p1', ['docs\\guide.md']), { index: 0, rel: 'docs/guide.md' });
+  assert.deepEqual(svc.resolveMd('p1', ['guide.md']), { index: 0, rel: 'docs/guide.md' });
+  assert.deepEqual(svc.resolveMd('p1', [path.join(root, 'docs', 'guide.md')]), { index: 0, rel: 'docs/guide.md' });
+  assert.deepEqual(svc.resolveMd('p1', ['missing.md', 'nope/x.md', 'guide.md', 'docs/guide.md']), { index: 2, rel: 'docs/guide.md' });
+});
+
+test('resolveMd: outside, traversal, non-Markdown and odd candidates do not resolve', () => {
+  const { svc, root, dir } = searchSetup();
+  fs.writeFileSync(path.join(root, 'notes.txt.bak'), 'x');
+  assert.equal(svc.resolveMd('p1', [path.join(dir, 'outside.md')]), null);
+  assert.equal(svc.resolveMd('p1', ['../outside.md']), null);
+  assert.equal(svc.resolveMd('p1', ['docs/../../outside.md']), null);
+  assert.equal(svc.resolveMd('p1', ['notes.txt']), null);
+  assert.equal(svc.resolveMd('p1', ['\\\\server\\share\\x.md', '//server/share/x.md', 'C:x.md', 'guide.md:hidden', 'a\0.md']), null);
+  assert.equal(svc.resolveMd('p1', ['docs']), null);
+  assert.equal(svc.resolveMd('p1', []), null);
+  assert.equal(svc.resolveMd('p1', 'docs/guide.md'), null, 'candidates must be a list');
+});
+
+test('resolveMd: non-strings and long candidates are skipped, only the first 16 count; unknown project is refused', () => {
+  const { svc } = searchSetup();
+  assert.deepEqual(svc.resolveMd('p1', [5, null, {}, 'x'.repeat(1020) + '.md', 'guide.md']), { index: 4, rel: 'docs/guide.md' });
+  assert.equal(svc.resolveMd('p1', ['x'.repeat(1022) + '.md']), null, 'over 1024 characters');
+  const late = Array(16).fill('missing.md').concat(['guide.md']);
+  assert.equal(late.length, 17);
+  assert.equal(svc.resolveMd('p1', late), null, 'the 17th candidate is ignored');
+  assert.deepEqual(svc.resolveMd('p1', Array(15).fill('missing.md').concat(['guide.md'])), { index: 15, rel: 'docs/guide.md' });
+  assert.deepEqual(svc.resolveMd('nope', ['guide.md']), { error: 'That project is not available' });
+});
+
+test('resolveMd: a symlink to a Markdown file outside the project is refused (skipped where links cannot be created)', (t) => {
+  const { svc, root, dir } = searchSetup();
+  try { fs.symlinkSync(dir, path.join(root, 'jx'), 'junction'); } catch { return t.skip('no junction'); }
+  assert.equal(svc.resolveMd('p1', ['jx/outside.md']), null);
+  assert.equal(svc.resolveMd('p1', [path.join(root, 'jx', 'outside.md')]), null);
 });
