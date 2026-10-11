@@ -9,7 +9,7 @@ On the client, a remote project's files panel, file search, cross-project search
 ## Decisions
 
 - **View-only.** No save, create, rename or delete.
-- **Size limit 2 MB** for viewing a file; larger files show "too large to view remotely". Binary files show "binary file".
+- **Size limit 2 MB** for viewing a file; larger files show "too large to view remotely". Binary files show "binary file". A second bound protects the channel: a text file whose JSON-escaped form exceeds **4 MiB** (a 2 MB file full of control characters escapes to about 12 MB, which would exceed the 16 MiB frame limit once sealed) is also reported as "too large". Normal 2 MB text is unaffected.
 - **Folder listing capped at 2,000 entries** (the rest is reported as truncated).
 - **Only files inside the project** are reachable. A path Claude printed that points outside the project (for example `~/notes.md`) is not viewable remotely.
 - **No live refresh.** A Reload button re-reads the file (the local popout's file watch cannot cross the network).
