@@ -27,6 +27,7 @@ const projectRename = require('./project-rename');
 const { searchProject } = require('./search');
 const { createFileService } = require('./remote-files');
 const remoteResults = require('./remote-results');
+const { renderRemoteMarkdown, plainHtml } = require('./remote-md');
 const { renderMarkdown, resolveRelativeLink } = require('./md-render');
 const { createSampler } = require('./sysmon');
 const { setupWorkbench } = require('./workbench-main');
@@ -1332,11 +1333,17 @@ function remoteProblem(res) {
   return (res.kind === 'md' || res.kind === 'text') && typeof res.text === 'string' ? null : 'The request failed';
 }
 
-function remoteMdDoc(id, rel, hostName, res) {
+// Rendered in a worker under a deadline (src/remote-md.js): a host's file must not freeze or crash this app. Too slow or
+// failing input comes back as escaped plain text. The popout then rebuilds the HTML from an allowlist (md.js).
+async function remoteMdDoc(id, rel, hostName, res) {
   const doc = { file: `${hostName}: ${rel}`, dir: null, remote: { hostName, id, rel } };
   const problem = remoteProblem(res);
   if (problem) return { ...doc, error: problem };
-  return { ...doc, html: renderMarkdown(res.text) }; // the popout rebuilds it from an allowlist (md.js)
+  try {
+    return { ...doc, html: (await renderRemoteMarkdown(res.text)).html };
+  } catch {
+    return { ...doc, html: plainHtml(res.text) };
+  }
 }
 
 function showWindow(w) {
@@ -1345,9 +1352,9 @@ function showWindow(w) {
   w.focus();
 }
 
-function openRemoteMd(id, rel, res) {
+async function openRemoteMd(id, rel, res) {
   const hostName = hostNameOf(id);
-  const doc = remoteMdDoc(id, rel, hostName, res);
+  const doc = await remoteMdDoc(id, rel, hostName, res);
   const key = remoteKey(id, rel);
   const existing = mdWindows.get(key);
   if (existing && !existing.isDestroyed()) {
@@ -1416,14 +1423,18 @@ function openRemoteEditor(id, rel, text, line) {
 // Fetch a file of a remote project and show it: Markdown in the popout, other text in the read-only editor.
 async function openRemoteFile(id, rel, line) {
   if (typeof rel !== 'string') return;
-  const res = await remote.filesRead(id, rel);
-  const problem = remoteProblem(res);
-  if (!(res && res.error)) remoteToasted.delete(hostOf(id));
-  if (problem) return send('toast', problem);
-  // A search hit (a line) opens the editor at that line even for Markdown, like a local hit; otherwise Markdown is rendered.
-  const at = Number(line) > 0 ? Number(line) : undefined;
-  if (res.kind === 'md' && !at) openRemoteMd(id, rel, res);
-  else openRemoteEditor(id, rel, res.text, at);
+  try {
+    const res = await remote.filesRead(id, rel);
+    const problem = remoteProblem(res);
+    if (!(res && res.error)) remoteToasted.delete(hostOf(id));
+    if (problem) return send('toast', problem);
+    // A search hit (a line) opens the editor at that line even for Markdown, like a local hit; otherwise Markdown is rendered.
+    const at = Number(line) > 0 ? Number(line) : undefined;
+    if (res.kind === 'md' && !at) await openRemoteMd(id, rel, res);
+    else openRemoteEditor(id, rel, res.text, at);
+  } catch {
+    send('toast', 'Could not open that file');
+  }
 }
 
 // A link clicked in a remote popout: web links go to this computer's browser, relative Markdown links open from the same host.
@@ -1439,10 +1450,14 @@ ipcMain.on('md:reload', async (ev) => {
   const w = remoteViewOf(ev.sender);
   if (!w) return;
   const { id, rel, hostName } = w.mdRemote;
-  const res = await remote.filesRead(id, rel);
-  if (w.isDestroyed()) return;
-  w.mdDoc = remoteMdDoc(id, rel, hostName, res);
-  w.webContents.send('md:render', w.mdDoc);
+  try {
+    const res = await remote.filesRead(id, rel);
+    if (w.isDestroyed()) return;
+    const doc = await remoteMdDoc(id, rel, hostName, res);
+    if (w.isDestroyed()) return;
+    w.mdDoc = doc;
+    w.webContents.send('md:render', w.mdDoc);
+  } catch { /* window closed meanwhile, or the host went away: the old copy stays */ }
 });
 
 // Built-in browser (src/browser-window.js): mockups, local dev servers, screenshots.
