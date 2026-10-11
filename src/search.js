@@ -49,6 +49,7 @@ async function searchProject(root, query, { regex, caseSensitive, maxHits = 500,
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { if (!IGNORED.has(e.name)) queue.push(r); continue; }
       if (!e.isFile()) continue;
+      if (isCancelled()) return null;
       if (isLate()) { out.truncated = true; return out; }
       if (++seen > maxFiles) { out.truncated = true; return out; }
       if (test(e.name) >= 0 && out.files.length < 200) out.files.push({ rel: r });

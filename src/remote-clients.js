@@ -94,12 +94,14 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
     }
   }
 
-  // A host's search rows, kept only if they are well-formed enough to show, with the id namespaced to that host.
+  // A host's search rows, kept only if they are well-formed enough to show, with the id namespaced to that host and
+  // the host's name for the label.
   const MAX_ROWS = 200;
-  function searchRows(hostId, reply) {
+  function searchRows(host, reply) {
     const rows = isObj(reply) && Array.isArray(reply.rows) ? reply.rows : [];
     return rows.filter((r) => isObj(r) && typeof r.id === 'string' && typeof r.rel === 'string').slice(0, MAX_ROWS).map((r) => ({
-      id: nsId(hostId, r.id),
+      id: nsId(host.id, r.id),
+      host: host.name,
       project: typeof r.project === 'string' ? r.project : '',
       rel: r.rel,
       line: Number.isInteger(r.line) && r.line >= 0 ? r.line : 0,
@@ -113,7 +115,7 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
     const errors = [];
     await Promise.all(onlineEntries().map(async (e) => {
       try {
-        rows.push({ at: e.host.id, list: searchRows(e.host.id, await e.client.request('files.searchAll', { query })) });
+        rows.push({ at: e.host.id, list: searchRows(e.host, await e.client.request('files.searchAll', { query })) });
       } catch (err) {
         errors.push({ host: e.host.id, name: e.host.name, message: errorText(err) });
       }

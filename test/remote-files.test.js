@@ -345,7 +345,7 @@ test('search: cancellation mid-way and the time budget', async () => {
   const late = searchSetup({ now: () => { const v = t; t += 25000; return v; } }).svc;
   const r = await late.search('p1', 'hello', {}, () => false);
   assert.deepEqual(r, { files: [], hits: [], truncated: true }, 'a budget gone before the walk starts finds nothing');
-  assert.equal(SEARCH_MS, 20000);
+  assert.equal(SEARCH_MS, 12000);
 });
 
 // A clock that stands still for the first n calls, then jumps past the budget: the walk ends partway through.

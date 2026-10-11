@@ -100,36 +100,31 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
         c.fileBusy -= 1;
       }
     };
-    // One running search per client (files.search and files.searchAll share it): a new one bumps c.searchToken, which
-    // cancels the old one, and frees the old one's slot at once, so a cancelled search that is still unwinding (a slow
-    // read, say) never makes the new one "Too many file requests". A disconnect bumps the token too.
-    const searchCall = (fn, valid) => async (c, a) => {
+    // Like local search, each kind has its own token: a new files.search cancels the client's running files.search, a
+    // new files.searchAll its running files.searchAll; a disconnect cancels both. A cancelled search keeps its slot
+    // until the service call really returns, so a client never has more than 4 live calls, however fast it sends.
+    // A refused request (invalid, regex, too many) cancels nothing.
+    const searchCall = (kind, fn, valid) => async (c, a) => {
       if (a.regex) throw new PublicError('Regex search is not available on remote projects yet');
       if (!valid(a)) throw invalid();
-      const my = ++c.searchToken;
-      const prev = c.search;
-      if (prev && !prev.freed) { prev.freed = true; c.fileBusy -= 1; }
-      c.search = null;
       takeSlot(c);
-      const run = { freed: false };
-      c.search = run;
-      const isCancelled = () => c.searchToken !== my;
+      const my = ++c.searchTokens[kind];
+      const isCancelled = () => c.searchTokens[kind] !== my;
       try {
         const r = await fn(a, isCancelled);
         if (isCancelled() || (r && r.cancelled)) throw new PublicError('Search cancelled');
         if (r && r.error) throw new PublicError(r.error);
         return r;
       } finally {
-        if (!run.freed) { run.freed = true; c.fileBusy -= 1; }
-        if (c.search === run) c.search = null;
+        c.fileBusy -= 1;
       }
     };
     handlers['files.list'] = fileCall((a) => fileService.list(a.id, a.rel));
     handlers['files.read'] = fileCall((a) => fileService.read(a.id, a.rel));
     handlers['files.git'] = fileCall((a) => fileService.git(a.id));
     handlers['md.resolve'] = fileCall((a) => fileService.resolveMd(a.id, a.candidates), mdArgs);
-    handlers['files.search'] = searchCall((a, isCancelled) => fileService.search(a.id, a.query, { caseSensitive: a.caseSensitive === true }, isCancelled), searchArgs);
-    handlers['files.searchAll'] = searchCall((a, isCancelled) => fileService.searchAll(a.query, isCancelled), (a) => queryOk(a.query));
+    handlers['files.search'] = searchCall('search', (a, isCancelled) => fileService.search(a.id, a.query, { caseSensitive: a.caseSensitive === true }, isCancelled), searchArgs);
+    handlers['files.searchAll'] = searchCall('all', (a, isCancelled) => fileService.searchAll(a.query, isCancelled), (a) => queryOk(a.query));
   }
 
   async function handle(c, msg) {
@@ -167,7 +162,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 15000);
     sock.on('error', () => {});
-    const c = { sock, channel: null, dev: null, attached: new Set(), searchToken: 0, search: null };
+    const c = { sock, channel: null, dev: null, attached: new Set(), searchTokens: { search: 0, all: 0 } };
     const hostNonce = C.newNonce();
     let waiting = true;
     let finished = false; // the first handshake line is final, whatever the outcome
@@ -217,7 +212,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
 
     sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel && !finished) noteFailure(addr); sock.destroy(); } });
-    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); c.searchToken++; if (!clients.size) lastProjects = ''; });
+    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); c.searchTokens.search++; c.searchTokens.all++; if (!clients.size) lastProjects = ''; });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 

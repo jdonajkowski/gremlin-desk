@@ -37,7 +37,7 @@ Cancellation: a new `files.search` / `files.searchAll` from the same client canc
 - `id` must be a known, non-missing project of this host (`projectList`), never an arbitrary path.
 - `rel` must be a string of at most 1024 characters, no NUL, not absolute, no drive letter, no `..` segment after normalizing `\` to `/`.
 - The resolved path must stay inside the project root **after resolving symlinks** (`realpath` of both); otherwise "That path is not allowed". Symlinks are not listed in folder listings.
-- File reads are capped at 2 MB, listings at 2,000 entries, a search at the existing hit and file caps plus a 20 second time budget, `query` at 200 characters, `candidates` at 16.
+- File reads are capped at 2 MB, listings at 2,000 entries, a search at the existing hit and file caps plus a 12 second time budget (under the client's 15 second request timeout), `query` at 200 characters, `candidates` at 16.
 - At most 4 file requests in flight per client; more are refused with "Too many file requests".
 - Searches and reads use the existing async or small synchronous helpers; no request may block the host window for more than a short moment.
 - Responses carry project-relative paths only.

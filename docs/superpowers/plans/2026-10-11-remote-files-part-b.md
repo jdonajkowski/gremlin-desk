@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Literal search only** over the channel (no regex): the remote request has no `regex` argument; a request carrying `regex: true` is refused with "Regex search is not available on remote projects yet". Query ≤ 200 chars, non-empty.
-- Existing caps: 500 hits / 20,000 files per project search; cross-project: 12 hits / 8,000 files per project, ≤ 200 rows; plus a **20 second** time budget per request; a new search from the same client cancels its previous one.
+- Existing caps: 500 hits / 20,000 files per project search; cross-project: 12 hits / 8,000 files per project, ≤ 200 rows; plus a **12 second** time budget per request; a new search from the same client cancels its previous one.
 - Responses carry project-relative paths only; `files.searchAll` rows carry the host's project ids (the client namespaces them).
 - `md.resolve`: at most 16 candidates of ≤ 1024 chars; only `.md/.markdown`; the result must be inside the project; returns `{ index, rel }` or `null`. Absolute candidates are accepted only if they resolve (realpath) inside the project root.
 - Same style, no new dependency, CRLF kept, commit trailer as in part A. Never touch `docs/manual/` or `docs/remote-sessions-guide.md`.
@@ -39,12 +39,12 @@
   - `search(id, query, { caseSensitive }, isCancelled): Promise<{ files, hits, truncated } | { error } | { cancelled: true }>`
   - `searchAll(query, isCancelled): Promise<{ rows } | { error } | { cancelled: true }>` (rows `{id, project, rel, line, text}`, same mapping as the local `files:searchAll` in main.js, at most 200)
   - `resolveMd(id, candidates): { index, rel } | null | { error }`
-- Constants: `SEARCH_MS = 20000`, `MAX_QUERY = 200`, `MAX_CANDIDATES = 16`.
+- Constants: `SEARCH_MS = 12000`, `MAX_QUERY = 200`, `MAX_CANDIDATES = 16`.
 
 - [ ] **Step 1: Failing tests** (real temp folders, a fake `isCancelled`, a fake clock for the time budget):
   1. `search` finds literal matches with `{rel, matches:[{line,text}]}`; `caseSensitive` respected; a query like `a.*b` is searched literally (no regex semantics: assert it matches the literal text `a.*b` and not `axxb`).
   2. Empty / non-string / >200-char query → `{error:'Enter something to search for'}`.
-  3. `isCancelled` returning true mid-way → `{cancelled:true}`; the time budget (fake clock jumping past 20 s) → result with `truncated:true`.
+  3. `isCancelled` returning true mid-way → `{cancelled:true}`; the time budget (fake clock jumping past 12 s) → result with `truncated:true`.
   4. Unknown project → `{error:'That project is not available'}`.
   5. `searchAll` returns rows from several projects (ids = project ids), skips missing projects, caps at 200, maps like main.js (first 5 file names with `line: 0`, then hits' first 3 matches).
   6. `resolveMd`: relative `docs/guide.md`; bare `guide.md` (tail match); absolute path inside the project (use `path.join(root,'docs','guide.md')`) → relative `docs/guide.md`; absolute path outside → `null`; `../x.md` → `null`; non-md → `null`; non-string / 17 candidates / candidate > 1024 chars → `{error}` or skipped as specified (16 max, extras ignored); index is the position of the first resolving candidate.

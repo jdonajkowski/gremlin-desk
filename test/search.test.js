@@ -52,3 +52,10 @@ test('searchProject: isLate ends the walk with the hits found so far; isCancelle
   assert.equal(part.truncated, true);
   assert.equal(await searchProject(root, 'needle', { isCancelled: () => true, isLate: () => true }), null, 'cancel wins');
 });
+
+test('searchProject: a cancel is seen between files inside one folder, not only between folders', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'search-'));
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(root, `f${i}.txt`), 'needle\n');
+  let n = 0;
+  assert.equal(await searchProject(root, 'needle', { isCancelled: () => ++n > 2 }), null);
+});

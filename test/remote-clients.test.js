@@ -299,7 +299,7 @@ test('filesSearch and mdResolve ask the host with the host-side id and return it
   const c = t.made.desk;
   online(c);
   c.reply = { files: [], hits: [], truncated: false };
-  assert.deepEqual(await t.m.filesSearch('r:desk/c:\p\a', 'foo', { caseSensitive: true }), c.reply);
+  assert.deepEqual(await t.m.filesSearch('r:desk/c:\\p\\a', 'foo', { caseSensitive: true }), c.reply);
   await t.m.filesSearch('r:desk/p', 'foo');
   await t.m.filesSearch('r:desk/p', 'foo', { caseSensitive: 'yes', extra: 1 });
   c.reply = null;
@@ -307,7 +307,7 @@ test('filesSearch and mdResolve ask the host with the host-side id and return it
   c.reply = { index: 0, rel: 'a.md' };
   assert.deepEqual(await t.m.mdResolve('r:desk/p', ['a.md']), { index: 0, rel: 'a.md' });
   assert.deepEqual(c.reqs, [
-    ['files.search', { id: 'c:\p\a', query: 'foo', caseSensitive: true }],
+    ['files.search', { id: 'c:\\p\\a', query: 'foo', caseSensitive: true }],
     ['files.search', { id: 'p', query: 'foo', caseSensitive: false }],
     ['files.search', { id: 'p', query: 'foo', caseSensitive: false }],
     ['md.resolve', { id: 'p', candidates: ['a.md'] }],
@@ -334,11 +334,22 @@ test('filesSearch and mdResolve pass hostile arguments to the host unchanged, fo
   const t = setup();
   const c = t.made.desk;
   online(c);
+  const long = 'x'.repeat(300);
+  const many = Array(17).fill('a.md');
+  const obj = { evil: 1 };
   await t.m.filesSearch('r:desk/p', 5);
-  await t.m.filesSearch('r:desk/p', 'x'.repeat(300));
+  await t.m.filesSearch('r:desk/p', long);
+  await t.m.filesSearch('r:desk/p', obj);
   await t.m.mdResolve('r:desk/p', 'a.md');
-  await t.m.mdResolve('r:desk/p', Array(17).fill('a.md'));
-  assert.deepEqual(c.reqs.map((r) => [r[0], typeof (r[1].query ?? r[1].candidates)]), [['files.search', 'number'], ['files.search', 'string'], ['md.resolve', 'string'], ['md.resolve', 'object']]);
+  await t.m.mdResolve('r:desk/p', many);
+  assert.deepEqual(c.reqs, [
+    ['files.search', { id: 'p', query: 5, caseSensitive: false }],
+    ['files.search', { id: 'p', query: long, caseSensitive: false }],
+    ['files.search', { id: 'p', query: obj, caseSensitive: false }],
+    ['md.resolve', { id: 'p', candidates: 'a.md' }],
+    ['md.resolve', { id: 'p', candidates: many }]
+  ]);
+  assert.equal(c.reqs[4][1].candidates, many, 'the same array, not a trimmed copy');
 });
 
 test('filesSearchAll asks every online host at once, namespaces the row ids and reports each host error', async () => {
@@ -349,8 +360,8 @@ test('filesSearchAll asks every online host at once, namespaces the row ids and 
   online(t.made.lap);
   const pending = [];
   t.made.desk.request = (tt, a) => { t.made.desk.reqs.push([tt, a]); return new Promise((res) => pending.push(() => res({ rows: [
-    { id: 'c:\p\a', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
-    { id: 'c:\p\a', project: 'A', rel: 'y.md', line: 0, text: '' },
+    { id: 'c:\\p\\a', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
+    { id: 'c:\\p\\a', project: 'A', rel: 'y.md', line: 0, text: '' },
     { id: 5, project: 'bad', rel: 'z', line: 1, text: 't' },
     null,
     { id: 'q', project: 'Q', rel: { evil: 1 }, line: 1, text: 't' },
@@ -363,9 +374,9 @@ test('filesSearchAll asks every online host at once, namespaces the row ids and 
   pending[0]();
   const r = await p;
   assert.deepEqual(r.rows, [
-    { id: 'r:desk/c:\p\a', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
-    { id: 'r:desk/c:\p\a', project: 'A', rel: 'y.md', line: 0, text: '' },
-    { id: 'r:desk/q', project: '', rel: 'r', line: 0, text: '' }
+    { id: 'r:desk/c:\\p\\a', host: 'Desk PC', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
+    { id: 'r:desk/c:\\p\\a', host: 'Desk PC', project: 'A', rel: 'y.md', line: 0, text: '' },
+    { id: 'r:desk/q', host: 'Desk PC', project: '', rel: 'r', line: 0, text: '' }
   ]);
   assert.deepEqual(r.errors, [{ host: 'lap', name: 'Laptop', message: 'Search cancelled' }]);
   assert.deepEqual(t.made.desk.reqs, [['files.searchAll', { query: 'foo' }]]);
@@ -380,6 +391,7 @@ test('filesSearchAll keeps at most 200 rows per host and survives a malformed re
   t.made.lap.reply = 'not an object';
   const r = await t.m.filesSearchAll('foo');
   assert.equal(r.rows.length, 200);
+  assert.ok(r.rows.every((row) => row.host === 'Desk PC' && row.id === 'r:desk/p'));
   assert.deepEqual(r.errors, []);
   t.made.desk.request = async () => { throw new Error('The other computer did not answer'); };
   t.made.lap.reply = { rows: 'nope' };

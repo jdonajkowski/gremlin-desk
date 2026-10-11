@@ -6,7 +6,7 @@ const MAX_REPLY_JSON = 4 * 1024 * 1024; // a text reply is JSON-escaped, sealed 
 const MAX_ENTRIES = 2000;
 const MAX_REL = 1024;
 const MD = /\.(md|markdown)$/i;
-const SEARCH_MS = 20000;
+const SEARCH_MS = 12000; // under the client's 15 s request timeout, so a long search still returns its partial result
 const MAX_QUERY = 200;
 const MAX_CANDIDATES = 16;
 
