@@ -344,12 +344,30 @@ test('search: cancellation mid-way and the time budget', async () => {
   let t = 1000;
   const late = searchSetup({ now: () => { const v = t; t += 25000; return v; } }).svc;
   const r = await late.search('p1', 'hello', {}, () => false);
-  assert.equal(r.truncated, true);
-  assert.ok(Array.isArray(r.files) && Array.isArray(r.hits));
-  t = 1000;
-  const all = await late.searchAll('hello', () => false);
-  assert.ok(Array.isArray(all.rows), 'the budget ends searchAll with the rows found so far');
+  assert.deepEqual(r, { files: [], hits: [], truncated: true }, 'a budget gone before the walk starts finds nothing');
   assert.equal(SEARCH_MS, 20000);
+});
+
+// A clock that stands still for the first n calls, then jumps past the budget: the walk ends partway through.
+function jumpAfter(n) {
+  let calls = 0;
+  return () => (++calls <= n ? 0 : SEARCH_MS + 1);
+}
+
+test('search: the time budget ending mid-walk keeps the hits found so far', async () => {
+  const { svc } = searchSetup({ now: jumpAfter(3) });
+  const r = await svc.search('p1', 'hello', {}, () => false);
+  assert.equal(r.truncated, true);
+  assert.deepEqual(r.hits, [{ rel: 'notes.txt', matches: [{ line: 1, text: 'Hello world' }, { line: 2, text: 'hello again' }] }]);
+});
+
+test('searchAll: the time budget keeps the rows of the project it was on, then stops', async () => {
+  const { svc } = searchSetup({ now: jumpAfter(4) });
+  const r = await svc.searchAll('hello', () => false);
+  assert.deepEqual(r.rows, [
+    { id: 'p1', project: 'One', rel: 'notes.txt', line: 1, text: 'Hello world' },
+    { id: 'p1', project: 'One', rel: 'notes.txt', line: 2, text: 'hello again' }
+  ]);
 });
 
 test('searchAll: rows from every non-missing project, mapped like the local search', async () => {
@@ -397,6 +415,10 @@ test('resolveMd: outside, traversal, non-Markdown and odd candidates do not reso
   assert.equal(svc.resolveMd('p1', ['notes.txt']), null);
   assert.equal(svc.resolveMd('p1', ['\\\\server\\share\\x.md', '//server/share/x.md', 'C:x.md', 'guide.md:hidden', 'a\0.md']), null);
   assert.equal(svc.resolveMd('p1', ['docs']), null);
+  assert.equal(svc.resolveMd('p1', ['docs/guide.md:x.md']), null, 'a colon is refused, also for the name match');
+  // On POSIX '//' + an absolute path inside the project would resolve to the guide if UNC-looking candidates were not skipped.
+  assert.equal(svc.resolveMd('p1', ['/' + path.join(root, 'docs', 'guide.md').replace(/\\/g, '/')]), null);
+  assert.equal(svc.resolveMd('p1', ['\\\\?\\' + path.join(root, 'docs', 'guide.md')]), null);
   assert.equal(svc.resolveMd('p1', []), null);
   assert.equal(svc.resolveMd('p1', 'docs/guide.md'), null, 'candidates must be a list');
 });

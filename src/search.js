@@ -30,7 +30,8 @@ function preview(line, col) {
 }
 
 // { files: [{ rel, name match }], hits: [{ rel, matches: [{ line, col, text }] }], truncated }
-async function searchProject(root, query, { regex, caseSensitive, maxHits = 500, maxFiles = 20000, isCancelled = () => false } = {}) {
+// isCancelled gives null (a newer search took over); isLate ends the walk early but keeps what was found (truncated).
+async function searchProject(root, query, { regex, caseSensitive, maxHits = 500, maxFiles = 20000, isCancelled = () => false, isLate = () => false } = {}) {
   const test = matcher(query, { regex, caseSensitive });
   const out = { files: [], hits: [], truncated: false };
   if (!test) return out;
@@ -39,6 +40,7 @@ async function searchProject(root, query, { regex, caseSensitive, maxHits = 500,
   const queue = [''];
   while (queue.length) {
     if (isCancelled()) return null;
+    if (isLate()) { out.truncated = true; return out; }
     const rel = queue.shift();
     let entries;
     try { entries = await fs.promises.readdir(path.join(root, rel), { withFileTypes: true }); } catch { continue; }
@@ -47,6 +49,7 @@ async function searchProject(root, query, { regex, caseSensitive, maxHits = 500,
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isDirectory()) { if (!IGNORED.has(e.name)) queue.push(r); continue; }
       if (!e.isFile()) continue;
+      if (isLate()) { out.truncated = true; return out; }
       if (++seen > maxFiles) { out.truncated = true; return out; }
       if (test(e.name) >= 0 && out.files.length < 200) out.files.push({ rel: r });
       let buf;

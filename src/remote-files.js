@@ -108,11 +108,10 @@ function createFileService({ fs, path, files, projectRoot, gitOps, searchProject
   }
 
   const badQuery = (q) => typeof q !== 'string' || !q || q.length > MAX_QUERY;
-  // Ends the search when the client cancels it or the time budget runs out; late() tells the two apart afterwards.
-  function budget(isCancelled) {
+  // The time budget: when it runs out the search stops but keeps what it found (truncated); a client cancel drops it.
+  function budget() {
     const t0 = now();
-    const late = () => now() - t0 > SEARCH_MS;
-    return { late, stop: () => !!isCancelled() || late() };
+    return () => now() - t0 > SEARCH_MS;
   }
 
   // Literal only (regex is false whatever the client sends): a catastrophic pattern could not be interrupted.
@@ -120,30 +119,30 @@ function createFileService({ fs, path, files, projectRoot, gitOps, searchProject
     if (badQuery(query)) return { error: 'Enter something to search for' };
     const root = typeof id === 'string' && id ? projectRoot(id) : null;
     if (!root) return { error: 'That project is not available' };
-    const b = budget(isCancelled);
-    const r = await searchProject(root, query, { regex: false, caseSensitive: !!(opts && opts.caseSensitive), maxHits: 500, maxFiles: 20000, isCancelled: b.stop });
-    if (!r) return isCancelled() || !b.late() ? { cancelled: true } : { files: [], hits: [], truncated: true };
+    const late = budget();
+    const r = await searchProject(root, query, { regex: false, caseSensitive: !!(opts && opts.caseSensitive), maxHits: 500, maxFiles: 20000, isCancelled: () => !!isCancelled(), isLate: late });
+    if (!r) return { cancelled: true };
     return {
       files: r.files.map((f) => ({ rel: f.rel })),
       hits: r.hits.map((h) => ({ rel: h.rel, matches: h.matches.map((m) => ({ line: m.line, text: m.text })) })),
-      truncated: r.truncated || b.late()
+      truncated: r.truncated
     };
   }
 
   // Same rows as the local files:searchAll in main.js: a few hits from each project so a common word does not drown the rest.
   async function searchAll(query, isCancelled = () => false) {
     if (badQuery(query)) return { error: 'Enter something to search for' };
-    const b = budget(isCancelled);
+    const late = budget();
     const rows = [];
     for (const p of projects()) {
       if (p.missing) continue;
       if (isCancelled()) return { cancelled: true };
-      if (b.late()) break;
-      const r = await searchProject(p.path, query, { regex: false, maxHits: 12, maxFiles: 8000, isCancelled: b.stop });
-      if (!r) { if (isCancelled() || !b.late()) return { cancelled: true }; break; }
+      if (late()) break;
+      const r = await searchProject(p.path, query, { regex: false, maxHits: 12, maxFiles: 8000, isCancelled: () => !!isCancelled(), isLate: late });
+      if (!r) return { cancelled: true };
       for (const f of r.files.slice(0, 5)) rows.push({ id: p.id, project: p.name, rel: f.rel, line: 0, text: '' });
       for (const hit of r.hits) for (const m of hit.matches.slice(0, 3)) rows.push({ id: p.id, project: p.name, rel: hit.rel, line: m.line, text: m.text });
-      if (rows.length >= 200) break;
+      if (rows.length >= 200 || late()) break; // the budget ended inside this project: keep its rows, skip the rest
     }
     return { rows: rows.slice(0, 200) };
   }
