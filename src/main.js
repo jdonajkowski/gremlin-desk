@@ -26,6 +26,7 @@ const gitOps = require('./git-ops');
 const projectRename = require('./project-rename');
 const { searchProject } = require('./search');
 const { createFileService } = require('./remote-files');
+const remoteResults = require('./remote-results');
 const { renderMarkdown, resolveRelativeLink } = require('./md-render');
 const { createSampler } = require('./sysmon');
 const { setupWorkbench } = require('./workbench-main');
@@ -957,7 +958,11 @@ const remoteHost = createRemoteHost({
     path,
     files,
     projectRoot: (id) => { const p = projectList.find((x) => x.id === id); return p && !p.missing ? p.path : null; },
-    gitOps
+    gitOps,
+    searchProject,
+    projects: () => projectList, // local projects only: remote rows live in remote.list(), never here
+    mdFiles: (root) => projectMdFiles(root), // the 5 s cache: a terminal link never walks the project uncached
+    findByTail: files.findByTail
   }),
   log: (e) => console.log('remote control:', e.result, e.device || '')
 });
@@ -1115,8 +1120,38 @@ function findMd(p, id) {
   return rel ? resolveMd(rel, root) : null;
 }
 
+// The host caps file requests per client: a request refused only for that is asked once more after a short pause.
+async function retryBusy(ask) {
+  const r = await ask();
+  if (!r || r.error !== remoteResults.BUSY) return r;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  return ask();
+}
+
+// A remote terminal's Markdown paths are resolved by the host (md.resolve), which answers with a project-relative path
+// or nothing; this computer's disk is never looked at. Cached briefly like the local index: the provider asks once per
+// hovered row, and the host allows only a few file requests per client at a time.
+const remoteMdCache = new Map(); // id \0 candidates -> { at, hit: Promise<{ index, file } | null> }
+function resolveRemoteMd(id, candidates) {
+  const sent = remoteResults.mdCandidates(candidates);
+  if (!sent || !sent.some(Boolean)) return Promise.resolve(null);
+  const key = `${id}\0${JSON.stringify(sent)}`;
+  const now = Date.now();
+  const cached = remoteMdCache.get(key);
+  if (cached && now - cached.at < 5000) return cached.hit;
+  if (remoteMdCache.size > 200) for (const [k, v] of remoteMdCache) if (now - v.at >= 5000) remoteMdCache.delete(k);
+  const hit = retryBusy(() => remote.mdResolve(id, sent)).then((r) => {
+    const ok = remoteResults.resolvedMd(r, sent.length);
+    if (!ok && r && r.error) remoteMdCache.delete(key); // an error (host offline, busy) is not an answer: ask again next time
+    return ok && { index: ok.index, file: ok.rel };
+  });
+  remoteMdCache.set(key, { at: now, hit });
+  return hit;
+}
+
 // Candidates come from md-links.js, longest first; the first one that is an existing file wins.
 ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
+  if (remote.has(id)) return resolveRemoteMd(id, candidates); // never a toast: this runs on hover
   if (!Array.isArray(candidates)) return null;
   for (let i = 0; i < candidates.length && i < 16; i++) {
     const file = findMd(candidates[i], owner(id));
@@ -1125,6 +1160,8 @@ ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
   return null;
 });
 ipcMain.on('md:open', (_e, { file: p, id }) => {
+  // A remote link opens the host's file (a project-relative path md.resolve gave) in the remote popout, never a local one.
+  if (remote.has(id)) return remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
   const file = findMd(p, owner(id));
   if (file) openMd(file);
 });
@@ -1457,6 +1494,16 @@ ipcMain.on('files:open', (_e, { id, rel }) => {
 
 let searchSeq = 0;
 ipcMain.handle('files:search', async (_e, { id, query, regex, caseSensitive }) => {
+  if (remote.has(id)) {
+    // Literal only (the pane hides its regex toggle for remote projects). A replaced or briefly refused search is quiet.
+    if (regex || typeof query !== 'string' || !query || query.length > 200) return null;
+    const cs = caseSensitive === true;
+    const r = await retryBusy(() => remote.filesSearch(id, query, { caseSensitive: cs }));
+    if (r && (r.error === remoteResults.CANCELLED || r.error === remoteResults.BUSY)) return null;
+    if (!r || r.error) return { error: (r && r.error) || 'The request failed' };
+    remoteToasted.delete(hostOf(id));
+    return remoteResults.searchResult(r, query, cs);
+  }
   const root = projectPath(id);
   if (!root) return null;
   const seq = ++searchSeq;
@@ -1467,6 +1514,27 @@ ipcMain.handle('files:search', async (_e, { id, query, regex, caseSensitive }) =
 let searchAllSeq = 0;
 ipcMain.handle('files:searchAll', async (_e, { query }) => {
   const seq = ++searchAllSeq;
+  // Paired hosts search at the same time as the local projects; their rows come after the local ones.
+  const remoteAsk = typeof query === 'string' && query && query.length <= 200 && remote.hosts().length ? remote.filesSearchAll(query) : null;
+  const local = await searchAllLocal(seq, query);
+  if (!local || !remoteAsk) return local;
+  let { rows, errors } = await remoteAsk;
+  const busy = remoteResults.busyHosts(errors);
+  if (busy.length && seq === searchAllSeq) {
+    // A host that was only busy is asked once more; the retry's rows and errors replace that host's.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (seq === searchAllSeq) {
+      const again = await remote.filesSearchAll(query);
+      rows = rows.concat(again.rows.filter((r) => busy.includes(hostOf(r.id))));
+      errors = errors.filter((e) => !busy.includes(e.host)).concat(again.errors.filter((e) => busy.includes(e.host)));
+    }
+  }
+  if (seq !== searchAllSeq) return null; // a newer search took over: no rows, no toast
+  const problem = remoteResults.findErrorText(errors);
+  if (problem) send('toast', problem); // once per search, all failing hosts in one line
+  return remoteResults.mergeFindRows(local, rows);
+});
+async function searchAllLocal(seq, query) {
   const rows = [];
   for (const p of projectList) {
     if (p.missing || seq !== searchAllSeq) continue;
@@ -1476,7 +1544,7 @@ ipcMain.handle('files:searchAll', async (_e, { query }) => {
     for (const hit of r.hits) for (const m of hit.matches.slice(0, 3)) rows.push({ id: p.id, project: p.name, rel: hit.rel, line: m.line, text: m.text });
   }
   return rows.slice(0, 200);
-});
+}
 ipcMain.handle('files:git', async (_e, { id }) => {
   if (remote.has(id)) {
     const r = await remote.filesGit(id);
