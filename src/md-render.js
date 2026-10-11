@@ -46,7 +46,9 @@
     tag = String(tag).toLowerCase();
     name = String(name).toLowerCase();
     value = String(value);
-    if (!(ALLOWED_ATTRS['*'].includes(name) || (ALLOWED_ATTRS[tag] || []).includes(name))) return null;
+    // Own keys only: a tag named like an Object.prototype member ('constructor') must not reach inherited values.
+    const forTag = Object.hasOwn(ALLOWED_ATTRS, tag) ? ALLOWED_ATTRS[tag] : [];
+    if (!(ALLOWED_ATTRS['*'].includes(name) || forTag.includes(name))) return null;
     if (name === 'title') return value.slice(0, 500);
     if (name === 'href') return isSafeHref(value) ? value : null;
     if (name === 'class') return /^language-[A-Za-z0-9_+-]+$/.test(value) ? value : null;

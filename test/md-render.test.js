@@ -43,6 +43,14 @@ test('isSafeHref refuses other schemes, obfuscation, UNC and protocol-relative l
   }
 });
 
+test('allowedAttr ignores tag names that are Object.prototype members', () => {
+  for (const tag of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    assert.strictEqual(allowedAttr(tag, 'name', 'x'), null, tag);
+    assert.strictEqual(allowedAttr(tag, 'length', '1'), null, tag);
+    assert.strictEqual(allowedAttr(tag, 'title', 'ok'), 'ok', tag); // the '*' list still applies
+  }
+});
+
 test('allowedAttr copies only the listed attributes', () => {
   assert.strictEqual(allowedAttr('a', 'href', 'docs/a.md'), 'docs/a.md');
   assert.strictEqual(allowedAttr('a', 'href', 'javascript:x'), null);
