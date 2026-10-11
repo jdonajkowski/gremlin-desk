@@ -157,3 +157,63 @@ test('read: a junction/directory link pointing outside the project is refused ev
   assert.deepEqual(svc.read('p1', 'JDIR/secret.txt'), process.platform === 'win32' ? { error: 'That path is not allowed' } : { error: 'Not found' });
   assert.ok(!svc.list('p1', '').entries.some((e) => e.name === 'jdir'), 'links are not listed');
 });
+
+test('paths: a colon anywhere is refused (alternate data streams, drive letters)', () => {
+  const { svc } = setup();
+  for (const rel of ['README.md:hidden', 'README.md:hidden:$DATA', 'README.md::$DATA', 'src/a.js:x', 'C:/x', 'src/C:x']) {
+    assert.deepEqual(svc.read('p1', rel), { error: 'That path is not allowed' }, rel);
+    assert.deepEqual(svc.list('p1', rel), { error: 'That path is not allowed' }, rel);
+  }
+});
+
+test('read: the size limit holds even if the file grows after fstat', () => {
+  const { svc, root } = setup();
+  const fake = Object.assign(Object.create(fs), {
+    openSync: () => 99,
+    closeSync: () => {},
+    fstatSync: () => ({ size: 10, mtimeMs: 1, isFile: () => true }),
+    readSync: (fd, buf, off, len) => { buf.fill(97, off, off + len); return len; }
+  });
+  const s = createFileService({ fs: fake, path, files, projectRoot: () => root });
+  const r = s.read('p1', 'src/a.js');
+  assert.equal(r.kind, 'toolarge');
+  assert.equal(r.text, undefined);
+});
+
+test('read: a NUL in the first 8 KB means binary, read from the same descriptor', () => {
+  const { svc, root } = setup();
+  fs.writeFileSync(path.join(root, 'nul.txt'), Buffer.concat([Buffer.from('abc'), Buffer.from([0]), Buffer.from('def')]));
+  const r = svc.read('p1', 'nul.txt');
+  assert.equal(r.kind, 'binary');
+  assert.equal(r.text, undefined);
+});
+
+test('names starting with two dots are listed and can be opened; real escapes are still refused', (t) => {
+  const { svc, root, dir } = setup();
+  fs.writeFileSync(path.join(root, '..foo'), 'dots');
+  fs.mkdirSync(path.join(root, '..cfg'));
+  fs.writeFileSync(path.join(root, '..cfg', 'x.txt'), 'inner');
+  const names = svc.list('p1', '').entries.map((e) => e.name);
+  assert.ok(names.includes('..foo') && names.includes('..cfg'));
+  assert.equal(svc.read('p1', '..foo').text, 'dots');
+  assert.equal(svc.read('p1', '..cfg/x.txt').text, 'inner');
+  assert.deepEqual(svc.list('p1', '..cfg').entries.map((e) => e.rel), ['..cfg/x.txt']);
+  assert.deepEqual(svc.read('p1', '../secret.txt'), { error: 'That path is not allowed' });
+  assert.deepEqual(svc.read('p1', '..cfg/../../secret.txt'), { error: 'That path is not allowed' });
+  try { fs.symlinkSync(dir, path.join(root, '..jx'), 'junction'); } catch { return t.skip('no junction'); }
+  assert.deepEqual(svc.read('p1', '..jx/secret.txt'), { error: 'That path is not allowed' });
+  assert.deepEqual(svc.list('p1', '..jx'), { error: 'That path is not allowed' });
+});
+
+test('read: name is the last requested segment, not the link target name', (t) => {
+  const { svc, root } = setup();
+  try { fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction'); } catch { return t.skip('no junction'); }
+  const r = svc.read('p1', 'alias/a.js');
+  assert.equal(r.name, 'a.js');
+  fs.mkdirSync(path.join(root, 'real'));
+  fs.writeFileSync(path.join(root, 'real', 'target.txt'), 'hi');
+  try { fs.symlinkSync(path.join(root, 'real', 'target.txt'), path.join(root, 'shown.txt'), 'file'); } catch { return; }
+  const s = svc.read('p1', 'shown.txt');
+  assert.equal(s.name, 'shown.txt');
+  assert.equal(s.rel, 'shown.txt');
+});

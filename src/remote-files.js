@@ -11,11 +11,18 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
   function cleanRel(rel) {
     if (rel === undefined || rel === null || rel === '') return '';
     if (typeof rel !== 'string' || rel.length > MAX_REL || rel.includes('\0')) return null;
+    // No ':' at all: blocks NTFS alternate data streams (file:stream) and drive letters. A POSIX name with ':' is refused too, an accepted tradeoff.
+    if (rel.includes(':')) return null;
     const s = rel.replace(/\\/g, '/');
     if (s.startsWith('/') || /^[A-Za-z]:/.test(s)) return null;
     const parts = s.split('/').filter((x) => x && x !== '.');
     if (parts.includes('..')) return null;
     return parts.join('/');
+  }
+
+  function inside(base, target) {
+    const r = path.relative(base, target);
+    return !(r === '..' || r.startsWith('..' + path.sep) || path.isAbsolute(r));
   }
 
   // The path must stay inside the project after symlinks are resolved.
@@ -24,8 +31,10 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
     if (!root) return { error: 'That project is not available' };
     const clean = cleanRel(rel);
     if (clean === null) return { error: 'That path is not allowed' };
-    const full = files.safeJoin(root, clean);
-    if (!full) return { error: 'That path is not allowed' };
+    // Not files.safeJoin: its startsWith('..') test also rejects names like '..foo'.
+    const base = path.resolve(root);
+    const full = path.resolve(base, clean);
+    if (!inside(base, full)) return { error: 'That path is not allowed' };
     let real;
     let realRoot;
     try {
@@ -34,8 +43,7 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
     } catch {
       return { error: 'Not found' };
     }
-    const r = path.relative(realRoot, real);
-    if (r.startsWith('..') || path.isAbsolute(r)) return { error: 'That path is not allowed' };
+    if (!inside(realRoot, real)) return { error: 'That path is not allowed' };
     return { root, clean, full: real };
   }
 
@@ -45,8 +53,17 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
     let st;
     try { st = fs.statSync(r.full); } catch { return { error: 'Not found' }; }
     if (!st.isDirectory()) return { error: 'Not a folder' };
-    const entries = files.listDir(r.root, r.clean);
-    if (!entries) return { error: 'Cannot read that folder' };
+    let dirents;
+    try { dirents = fs.readdirSync(r.full, { withFileTypes: true }); } catch { return { error: 'Cannot read that folder' }; }
+    const out = [];
+    for (const e of dirents) {
+      const isDir = e.isDirectory();
+      if (!isDir && !e.isFile()) continue;
+      if (isDir && files.IGNORED.has(e.name)) continue;
+      out.push({ name: e.name, rel: r.clean ? `${r.clean}/${e.name}` : e.name, dir: isDir });
+    }
+    const cmp = (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+    const entries = [...out.filter((e) => e.dir).sort(cmp), ...out.filter((e) => !e.dir).sort(cmp)];
     return { entries: entries.slice(0, MAX_ENTRIES), truncated: entries.length > MAX_ENTRIES };
   }
 
@@ -56,13 +73,30 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
     let st;
     try { st = fs.statSync(r.full); } catch { return { error: 'Not found' }; }
     if (!st.isFile()) return { error: 'Not a file' };
-    const name = path.basename(r.full);
-    const head = { rel: r.clean, name, size: st.size, mtimeMs: st.mtimeMs };
-    if (st.size > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
-    if (!files.isTextFile(r.full)) return { ...head, kind: 'binary' };
-    let text;
-    try { text = fs.readFileSync(r.full, 'utf8'); } catch { return { error: 'Not found' }; }
-    return { ...head, kind: MD.test(name) ? 'md' : 'text', text: text.replace(/^﻿/, '') };
+    const name = path.posix.basename(r.clean);
+    // One descriptor: its size and its bytes come from the same open file, and never more than the cap is read.
+    let fd;
+    try {
+      fd = fs.openSync(r.full, 'r');
+      const fst = fs.fstatSync(fd);
+      const head = { rel: r.clean, name, size: fst.size, mtimeMs: fst.mtimeMs };
+      if (fst.size > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
+      const buf = Buffer.alloc(MAX_VIEW_BYTES + 1);
+      let n = 0;
+      while (n < buf.length) {
+        const got = fs.readSync(fd, buf, n, buf.length - n, n);
+        if (!got) break;
+        n += got;
+      }
+      if (n > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
+      const bytes = buf.subarray(0, n);
+      if (bytes.subarray(0, 8192).includes(0)) return { ...head, kind: 'binary' };
+      return { ...head, kind: MD.test(name) ? 'md' : 'text', text: bytes.toString('utf8').replace(/^﻿/, '') };
+    } catch {
+      return { error: 'Not found' };
+    } finally {
+      if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+    }
   }
 
   async function git(id) {
