@@ -21,9 +21,16 @@
     if (!doc) return setStatus('Nothing to edit', true);
     if (doc.error) return setStatus(`Could not read the file: ${doc.error}`, true);
 
-    document.title = doc.name;
+    const readOnly = doc.readOnly === true; // a copy from another computer: nothing to save, no file to open in VS Code
+    document.title = readOnly ? `${doc.name} (read-only)` : doc.name;
     $('path').textContent = doc.file;
     $('path').title = doc.file;
+    if (readOnly) {
+      saveBtn.hidden = true;
+      $('btn-vscode').hidden = true;
+      $('ro-banner').textContent = doc.banner || 'Read-only copy';
+      $('ro-banner').hidden = false;
+    }
 
     monaco.editor.defineTheme('widget', {
       base: 'vs-dark',
@@ -42,10 +49,12 @@
     const lang = monaco.languages.getLanguages().find((l) =>
       (l.filenames || []).some((f) => f.toLowerCase() === lower) ||
       (l.extensions || []).some((e) => lower.endsWith(e.toLowerCase())));
-    const model = monaco.editor.createModel(doc.text, lang ? lang.id : 'plaintext', monaco.Uri.file(doc.file));
+    const uri = readOnly ? monaco.Uri.from({ scheme: 'remote', path: '/' + doc.name }) : monaco.Uri.file(doc.file);
+    const model = monaco.editor.createModel(doc.text, lang ? lang.id : 'plaintext', uri);
 
     const editor = monaco.editor.create($('editor'), {
       model,
+      readOnly,
       theme: 'widget',
       automaticLayout: true,
       fontFamily: doc.fontFamily,
@@ -77,6 +86,7 @@
     refreshDirty();
 
     async function save() {
+      if (readOnly) return false;
       const version = model.getAlternativeVersionId();
       const res = await host.save(model.getValue());
       if (!res || res.error) {

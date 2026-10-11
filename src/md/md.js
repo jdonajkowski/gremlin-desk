@@ -9,7 +9,10 @@
 
   window.mdView.onRender((doc) => {
     current = doc;
-    document.title = doc.file.split(/[\\/]/).pop();
+    // A document from another computer: no file to edit or open here, only Reload; its images cannot load.
+    for (const id of ['btn-edit', 'btn-vscode']) document.getElementById(id).hidden = !!doc.remote;
+    document.getElementById('btn-reload').hidden = !doc.remote;
+    document.title = doc.remote ? `${doc.remote.rel.split('/').pop()} · ${doc.remote.hostName}` : doc.file.split(/[\\/]/).pop();
     pathEl.textContent = doc.file;
     if (doc.error) {
       docEl.innerHTML = '';
@@ -20,7 +23,7 @@
       return;
     }
     // Relative image paths resolve against the Markdown file's folder.
-    baseEl.href = fileUrl(doc.dir);
+    if (doc.dir) baseEl.href = fileUrl(doc.dir);
     const scroll = document.scrollingElement.scrollTop;
     docEl.innerHTML = doc.html;
     document.scrollingElement.scrollTop = scroll; // keep the place on live reloads
@@ -47,6 +50,7 @@
     }
   }).observe(docEl, { childList: true });
 
+  document.getElementById('btn-reload').onclick = () => window.mdView.reload();
   document.getElementById('btn-edit').onclick = () => window.mdView.edit();
   document.getElementById('btn-vscode').onclick = () => window.mdView.openInVSCode();
 
