@@ -19,8 +19,11 @@
     let renderSeq = 0;
     let query = '';
     let notice = '';
+    let label = ''; // header text when the listing has no root folder to name (remote projects)
+    const searchHint = qEl.placeholder;
     let regex = false;
     let caseSensitive = false;
+    let remote = false; // the project is on a paired host
 
     const openDirs = () => {
       if (!expanded.has(projectId)) expanded.set(projectId, new Set());
@@ -36,9 +39,9 @@
       // Switched project (or refreshed) while this was loading: the answer is stale.
       if (id !== projectId || into !== cache) return entries;
       if (rel === '' && res) {
-        const name = res.root.split(/[\\/]/).filter(Boolean).pop() || res.root;
+        const name = res.root.split(/[\\/]/).filter(Boolean).pop() || res.root || label || 'Files';
         headEl.textContent = name;
-        headEl.title = res.root;
+        headEl.title = res.root || name;
       }
       cache.set(rel, entries);
       return entries;
@@ -100,6 +103,7 @@
       if (query) return renderSearch();
       const seq = ++renderSeq;
       const frag = document.createDocumentFragment();
+      let failed = false; // the project folder itself could not be listed (a remote host that is offline)
       if (!projectId) {
         headEl.textContent = 'Files';
         headEl.title = '';
@@ -107,7 +111,7 @@
         const dirs = openDirs();
         const walk = async (rel, depth) => {
           const entries = await load(rel);
-          if (!entries) return;
+          if (!entries) { if (!depth) failed = true; return; }
           for (const e of entries) {
             frag.appendChild(row(e, depth));
             if (e.dir && dirs.has(e.rel)) await walk(e.rel, depth + 1);
@@ -116,7 +120,7 @@
         await walk('', 0);
       }
       if (seq !== renderSeq) return; // a newer render started meanwhile
-      swapIn(frag, projectId ? 'Empty folder' : notice || 'No project open');
+      swapIn(frag, projectId ? (failed && String(projectId).startsWith('r:') ? 'Could not list the files. Try refresh.' : 'Empty folder') : notice || 'No project open');
     }
 
     // --- Search ------------------------------------------------------------------------------------
@@ -144,6 +148,7 @@
       const res = await widget.files.search(projectId, q, { regex, caseSensitive });
       if (seq !== renderSeq || q !== query) return;
       if (!res) return swapIn(frag, regex ? 'Invalid pattern' : 'No results');
+      if (res.error) return swapIn(frag, `Search failed: ${res.error}`); // a remote host that could not answer
       // The match length for highlighting: plain text is the query; a regex is measured per line.
       const lenAt = (text, col) => {
         if (!regex) return q.length;
@@ -244,11 +249,26 @@
       return render();
     }
 
-    // notice: shown instead of "No project open" when there is no project to list (e.g. a remote session).
-    function setProject(id, text = '') {
+    // Remote projects search plain text only (the host never runs a regex): the .* toggle is hidden and off there,
+    // and comes back as it was for a local project.
+    let localRegex = false;
+    function setRemoteSearch(isRemote) {
+      if (isRemote === remote) return;
+      remote = isRemote;
+      if (remote) { localRegex = regex; regex = false; } else regex = localRegex;
+      regexBtn.hidden = regexBtn.disabled = remote;
+      regexBtn.classList.toggle('on', regex);
+      qEl.placeholder = remote ? 'Search (plain text)' : searchHint;
+    }
+
+    // notice: shown instead of "No project open" when there is no project to list.
+    // label: the header for a project whose listing has no root path (remote).
+    function setProject(id, text = '', name = '') {
       if (id === projectId && text === notice) return;
       projectId = id;
       notice = text;
+      label = name;
+      setRemoteSearch(typeof id === 'string' && id.startsWith('r:'));
       badges = {};
       listEl.scrollTop = 0;
       refresh();

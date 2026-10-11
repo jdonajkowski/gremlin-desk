@@ -63,5 +63,12 @@ button:hover { background: rgba(255, 255, 255, 0.08); }
 }
 #banner[hidden] { display: none; }
 #banner span { flex: 1; }
+#ro-banner {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  background: rgba(100, 150, 255, 0.14);
+  color: #8fb4ff;
+}
+#ro-banner[hidden] { display: none; }
 
 #editor { flex: 1; min-height: 0; }

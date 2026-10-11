@@ -25,6 +25,10 @@ const tasks = require('./tasks');
 const gitOps = require('./git-ops');
 const projectRename = require('./project-rename');
 const { searchProject } = require('./search');
+const { createFileService } = require('./remote-files');
+const remoteResults = require('./remote-results');
+const { renderRemoteMarkdown, plainHtml } = require('./remote-md');
+const { renderMarkdown, resolveRelativeLink } = require('./md-render');
 const { createSampler } = require('./sysmon');
 const { setupWorkbench } = require('./workbench-main');
 const { buildLaunch } = require('./sessions');
@@ -949,6 +953,18 @@ const remoteHost = createRemoteHost({
   // A remote client restarted it: clear this window's copy too (the old screen would stay in its scrollback)
   restart: (id, cols, rows) => { send('remote:reset', { id }); sessions.restart(id, cols, rows); },
   closeSession: (id) => closeSession(id),
+  // Read-only file browsing for paired clients: only the listed, non-missing projects (projectPath would also return orphan session folders)
+  fileService: createFileService({
+    fs,
+    path,
+    files,
+    projectRoot: (id) => { const p = projectList.find((x) => x.id === id); return p && !p.missing ? p.path : null; },
+    gitOps,
+    searchProject,
+    projects: () => projectList, // local projects only: remote rows live in remote.list(), never here
+    mdFiles: (root) => projectMdFiles(root), // the 5 s cache: a terminal link never walks the project uncached
+    findByTail: files.findByTail
+  }),
   log: (e) => console.log('remote control:', e.result, e.device || '')
 });
 
@@ -1015,6 +1031,7 @@ ipcMain.handle('remote:addHost', (_e, form) => {
 });
 ipcMain.handle('remote:removeHost', (_e, { id } = {}) => {
   saveRemote(remoteConfig.removeHost(remoteCfg, id));
+  remoteToasted.delete(id);
   remote.sync();
   return remoteState();
 });
@@ -1037,12 +1054,9 @@ function resolveMd(p, from) {
 }
 
 function renderMd(file) {
-  const { marked } = require('marked');
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch (err) { return { file, error: err.message }; }
-  // YAML front matter is metadata, not content.
-  text = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '');
-  return { file, dir: path.dirname(file), html: marked.parse(text, { gfm: true }) };
+  return { file, dir: path.dirname(file), html: renderMarkdown(text) };
 }
 
 function openMd(file) {
@@ -1107,8 +1121,41 @@ function findMd(p, id) {
   return rel ? resolveMd(rel, root) : null;
 }
 
+// The host caps file requests per client: a request refused only for that is asked once more after a short pause.
+async function retryBusy(ask) {
+  const r = await ask();
+  if (!r || r.error !== remoteResults.BUSY) return r;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  return ask();
+}
+
+// A remote terminal's Markdown paths are resolved by the host (md.resolve), which answers with a project-relative path
+// or nothing; this computer's disk is never looked at. Cached briefly like the local index: the provider asks once per
+// hovered row, and the host allows only a few file requests per client at a time.
+const remoteMdCache = new Map(); // id \0 candidates -> { at, hit: Promise<{ index, file } | null> }
+function resolveRemoteMd(id, candidates) {
+  const sent = remoteResults.mdCandidates(candidates);
+  if (!sent || !sent.some(Boolean)) return Promise.resolve(null);
+  const key = `${id}\0${JSON.stringify(sent)}`;
+  const now = Date.now();
+  const cached = remoteMdCache.get(key);
+  if (cached && now - cached.at < 5000) return cached.hit;
+  if (remoteMdCache.size > 200) for (const [k, v] of remoteMdCache) if (now - v.at >= 5000) remoteMdCache.delete(k);
+  const entry = { at: now, hit: null };
+  entry.hit = retryBusy(() => remote.mdResolve(id, sent)).then((r) => {
+    const ok = remoteResults.resolvedMd(r, sent.length);
+    // An error (host offline, busy) is not an answer: ask again next time, unless a newer entry already replaced this one.
+    if (!ok && r && r.error && remoteMdCache.get(key) === entry) remoteMdCache.delete(key);
+    return ok && { index: ok.index, file: ok.rel };
+  });
+  remoteMdCache.set(key, entry);
+  return entry.hit;
+}
+
 // Candidates come from md-links.js, longest first; the first one that is an existing file wins.
 ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
+  // Any r: id is the host's, even when that host was removed meanwhile: never resolved against this computer's disk.
+  if (remoteResults.looksRemote(id)) return remote.has(id) ? resolveRemoteMd(id, candidates) : null; // never a toast: this runs on hover
   if (!Array.isArray(candidates)) return null;
   for (let i = 0; i < candidates.length && i < 16; i++) {
     const file = findMd(candidates[i], owner(id));
@@ -1117,11 +1164,15 @@ ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
   return null;
 });
 ipcMain.on('md:open', (_e, { file: p, id }) => {
+  // A remote link opens the host's file (a project-relative path md.resolve gave) in the remote popout, never a local one.
+  if (remoteResults.looksRemote(id)) return remote.has(id) && remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
   const file = findMd(p, owner(id));
   if (file) openMd(file);
 });
 // Links inside a popout: web links go to the browser, other Markdown files open in their own popout.
-ipcMain.on('md:link', (_e, { href, from }) => {
+ipcMain.on('md:link', (ev, { href, from }) => {
+  const rw = remoteViewOf(ev.sender);
+  if (rw) return openRemoteLink(rw, href);
   if (/^https?:\/\//i.test(href)) return shell.openExternal(href);
   let target;
   try { target = decodeURIComponent(String(href).split('#')[0]); } catch { return; }
@@ -1214,6 +1265,10 @@ function openEditor(file, line) {
 ipcMain.handle('editor:get', (ev) => {
   const e = editorFor(ev.sender);
   if (!e) return null;
+  if (e.remote) {
+    const { hostName, rel, text, line } = e.remote;
+    return { file: `${hostName}: ${rel}`, name: baseName(rel), text, line, readOnly: true, hostName, banner: `Read-only copy from ${hostName}`, fontFamily: config.fontFamily, fontSize: config.fontSize };
+  }
   try {
     const { text, bom } = readForEdit(e.file);
     e.disk = text;
@@ -1227,6 +1282,7 @@ ipcMain.handle('editor:get', (ev) => {
 // Keeps a UTF-8 BOM if the file had one; line endings are whatever the text already uses.
 ipcMain.handle('editor:save', (ev, text) => {
   const e = editorFor(ev.sender);
+  if (e && e.remote) return { error: 'Read-only' }; // a copy from another computer: never written, whatever the page sends
   if (!e || typeof text !== 'string') return { error: 'No file' };
   try {
     e.disk = text;
@@ -1237,14 +1293,172 @@ ipcMain.handle('editor:save', (ev, text) => {
     return { error: err.message };
   }
 });
-ipcMain.on('editor:dirty', (ev, dirty) => { const e = editorFor(ev.sender); if (e) e.dirty = !!dirty; });
-ipcMain.on('editor:vscode', (ev, line) => { const e = editorFor(ev.sender); if (e) openInVSCode(e.file, Number(line) || undefined); });
+ipcMain.on('editor:dirty', (ev, dirty) => { const e = editorFor(ev.sender); if (e && !e.remote) e.dirty = !!dirty; });
+ipcMain.on('editor:vscode', (ev, line) => { const e = editorFor(ev.sender); if (e && !e.remote) openInVSCode(e.file, Number(line) || undefined); });
 ipcMain.on('editor:close', (ev) => { const e = editorFor(ev.sender); if (e) { e.forceClose = true; e.win.close(); } });
 
 // The Markdown viewer's Edit and VS Code buttons act on the file that viewer shows.
 const mdFileOf = (sender) => { const w = BrowserWindow.fromWebContents(sender); return w && w.mdFile; };
 ipcMain.on('md:edit', (ev) => { const f = mdFileOf(ev.sender); if (f) openEditor(f); });
 ipcMain.on('md:vscode', (ev) => { const f = mdFileOf(ev.sender); if (f) openInVSCode(f); });
+
+// ---------------------------------------------------------------------------
+// Remote files (read-only): the text comes from the host over the channel. These windows never write to disk and never
+// open a path on this computer; they only know the project id and the project-relative path.
+// ---------------------------------------------------------------------------
+const baseName = (rel) => String(rel).split('/').pop() || String(rel);
+const remoteKey = (id, rel) => `r:${id}\0${rel}`;
+const remoteViewOf = (sender) => { const w = BrowserWindow.fromWebContents(sender); return w && !w.isDestroyed() && w.mdRemote ? w : null; };
+
+// A host that stays offline would toast on every refresh: say each error once per host until a request succeeds again.
+const remoteToasted = new Map(); // host id -> last error shown
+const hostOf = (id) => (remoteConfig.parseNsId(id) || {}).hostId;
+function toastOnce(id, msg) {
+  const h = hostOf(id);
+  if (remoteToasted.get(h) !== msg) { remoteToasted.set(h, msg); send('toast', msg); }
+}
+
+function hostNameOf(id) {
+  const p = remoteConfig.parseNsId(id);
+  const h = p && remote.hosts().find((x) => x.id === p.hostId);
+  return (h && h.name) || 'the other computer';
+}
+
+// The message to show instead of a document, or null when res is text we can show.
+function remoteProblem(res) {
+  if (!res || typeof res !== 'object') return 'The request failed';
+  if (res.error) return String(res.error);
+  if (res.kind === 'binary') return 'Binary file';
+  if (res.kind === 'toolarge') return 'File is too large to view remotely (over 2 MB)';
+  return (res.kind === 'md' || res.kind === 'text') && typeof res.text === 'string' ? null : 'The request failed';
+}
+
+// Rendered in a worker under a deadline (src/remote-md.js): a host's file must not freeze or crash this app. Too slow or
+// failing input comes back as escaped plain text. The popout then rebuilds the HTML from an allowlist (md.js).
+async function remoteMdDoc(id, rel, hostName, res) {
+  const doc = { file: `${hostName}: ${rel}`, dir: null, remote: { hostName, id, rel } };
+  const problem = remoteProblem(res);
+  if (problem) return { ...doc, error: problem };
+  try {
+    return { ...doc, html: (await renderRemoteMarkdown(res.text)).html };
+  } catch {
+    return { ...doc, html: plainHtml(res.text) };
+  }
+}
+
+function showWindow(w) {
+  if (w.isMinimized()) w.restore();
+  w.show();
+  w.focus();
+}
+
+async function openRemoteMd(id, rel, res) {
+  const hostName = hostNameOf(id);
+  const doc = await remoteMdDoc(id, rel, hostName, res);
+  const key = remoteKey(id, rel);
+  const existing = mdWindows.get(key);
+  if (existing && !existing.isDestroyed()) {
+    existing.mdDoc = doc;
+    existing.webContents.send('md:render', doc);
+    return showWindow(existing);
+  }
+  const md = new BrowserWindow({
+    width: 760,
+    height: 860,
+    title: `${baseName(rel)} · ${hostName}`,
+    backgroundColor: config.theme.background,
+    autoHideMenuBar: true,
+    icon: path.join(__dirname, '..', 'assets', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'md', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  md.setMenu(null);
+  md.mdRemote = { id, rel, hostName };
+  md.mdDoc = doc;
+  mdWindows.set(key, md);
+  md.webContents.on('did-finish-load', () => !md.isDestroyed() && md.webContents.send('md:render', md.mdDoc));
+  md.on('closed', () => { if (mdWindows.get(key) === md) mdWindows.delete(key); });
+  md.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  md.webContents.on('will-navigate', (e) => e.preventDefault());
+  md.loadFile(path.join(__dirname, 'md', 'md.html'));
+}
+
+function openRemoteEditor(id, rel, text, line) {
+  const hostName = hostNameOf(id);
+  const key = remoteKey(id, rel);
+  const existing = editors.get(key);
+  if (existing && !existing.win.isDestroyed()) {
+    existing.remote.text = text;
+    existing.remote.line = line;
+    existing.win.webContents.send('editor:remote', { text, line }); // a fresh copy replaces the old one, quietly
+    return showWindow(existing.win);
+  }
+  const ed = new BrowserWindow({
+    width: 900,
+    height: 820,
+    title: `${baseName(rel)} · ${hostName}`,
+    backgroundColor: config.theme.background,
+    autoHideMenuBar: true,
+    icon: path.join(__dirname, '..', 'assets', 'icon.png'),
+    webPreferences: {
+      preload: path.join(__dirname, 'editor', 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  ed.setMenu(null);
+  const e = { win: ed, file: null, line, bom: false, disk: null, dirty: false, forceClose: false, remote: { id, rel, hostName, text, line } };
+  editors.set(key, e);
+  ed.on('closed', () => { if (editors.get(key) === e) editors.delete(key); });
+  ed.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  ed.webContents.on('will-navigate', (ev) => ev.preventDefault());
+  ed.loadFile(path.join(__dirname, 'editor', 'editor.html'));
+}
+
+// Fetch a file of a remote project and show it: Markdown in the popout, other text in the read-only editor.
+async function openRemoteFile(id, rel, line) {
+  if (typeof rel !== 'string') return;
+  try {
+    const res = await remote.filesRead(id, rel);
+    const problem = remoteProblem(res);
+    if (!(res && res.error)) remoteToasted.delete(hostOf(id));
+    if (problem) return send('toast', problem);
+    // A search hit (a line) opens the editor at that line even for Markdown, like a local hit; otherwise Markdown is rendered.
+    const at = Number(line) > 0 ? Number(line) : undefined;
+    if (res.kind === 'md' && !at) await openRemoteMd(id, rel, res);
+    else openRemoteEditor(id, rel, res.text, at);
+  } catch {
+    send('toast', 'Could not open that file');
+  }
+}
+
+// A link clicked in a remote popout: web links go to this computer's browser, relative Markdown links open from the same host.
+function openRemoteLink(w, href) {
+  if (typeof href !== 'string') return;
+  if (/^https?:\/\//i.test(href)) return shell.openExternal(href).catch(() => {});
+  const rel = resolveRelativeLink(w.mdRemote.rel, href);
+  if (rel) openRemoteFile(w.mdRemote.id, rel);
+}
+
+// The remote popout has no file watch: Reload asks the host again (and shows the error when it cannot answer).
+ipcMain.on('md:reload', async (ev) => {
+  const w = remoteViewOf(ev.sender);
+  if (!w) return;
+  const { id, rel, hostName } = w.mdRemote;
+  try {
+    const res = await remote.filesRead(id, rel);
+    if (w.isDestroyed()) return;
+    const doc = await remoteMdDoc(id, rel, hostName, res);
+    if (w.isDestroyed()) return;
+    w.mdDoc = doc;
+    w.webContents.send('md:render', w.mdDoc);
+  } catch { /* window closed meanwhile, or the host went away: the old copy stays */ }
+});
 
 // Built-in browser (src/browser-window.js): mockups, local dev servers, screenshots.
 const browser = createBrowser({ icon: path.join(__dirname, '..', 'assets', 'icon.png'), projectDir: () => (remoteFront ? null : projectPath(activeId)), isWin });
@@ -1257,7 +1471,7 @@ const control = config.browserControl === false ? null : createControl({ browser
 // Files pane: browse the active project's folder
 // ---------------------------------------------------------------------------
 function projectPath(id) {
-  if (!id) return null;
+  if (!id || remoteResults.isRemoteId(id)) return null; // a host's project (paired or removed) never maps to a folder here
   const p = projectList.find((x) => x.id === id);
   return (p && !p.missing && p.path) || (sessions.has(id) ? sessions.cwd(id) : null);
 }
@@ -1267,7 +1481,14 @@ ipcMain.on('files:setOpen', (_e, open) => {
   writeJson(statePath, state);
 });
 
-ipcMain.handle('files:list', (_e, { id, rel }) => {
+ipcMain.handle('files:list', async (_e, { id, rel }) => {
+  if (remoteResults.isRemoteId(id)) {
+    const r = await remote.filesList(id, rel);
+    const entries = r && !r.error ? remoteResults.listEntries(r) : null;
+    if (!entries) { toastOnce(id, (r && r.error) || 'The request failed'); return null; }
+    remoteToasted.delete(hostOf(id));
+    return { root: '', entries };
+  }
   const root = projectPath(id);
   if (!root) return null;
   return { root, entries: files.listDir(root, rel) };
@@ -1281,6 +1502,7 @@ function fileTarget(id, rel) {
 // Click: Markdown opens in the viewer, other text files in the editor, runnable binaries are shown in
 // Explorer, the rest open in their default app.
 ipcMain.on('files:open', (_e, { id, rel }) => {
+  if (remoteResults.isRemoteId(id)) return openRemoteFile(id, rel);
   const file = fileTarget(id, rel);
   if (!file || !fs.existsSync(file)) return;
   const action = files.openAction(file, files.isTextFile);
@@ -1292,7 +1514,26 @@ ipcMain.on('files:open', (_e, { id, rel }) => {
 });
 
 let searchSeq = 0;
+let remoteSearchSeq = 0; // one for all hosts: the pane runs one search at a time
 ipcMain.handle('files:search', async (_e, { id, query, regex, caseSensitive }) => {
+  if (remoteResults.isRemoteId(id)) {
+    // Literal only (the pane hides its regex toggle for remote projects). A search a newer one replaced is quiet (null).
+    if (regex || typeof query !== 'string' || !query || query.length > 200) return null;
+    const seq = ++remoteSearchSeq;
+    const cs = caseSensitive === true;
+    const ask = () => remote.filesSearch(id, query, { caseSensitive: cs });
+    let r = await ask();
+    if (r && r.error === remoteResults.BUSY) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (seq !== remoteSearchSeq) return null; // retrying now would cancel the newer search at the host
+      r = await ask();
+    }
+    if (seq !== remoteSearchSeq) return null;
+    if (r && r.error === remoteResults.BUSY) return { error: 'The other computer is busy, try again' };
+    if (!r || r.error) return { error: (r && r.error) || 'The request failed' };
+    remoteToasted.delete(hostOf(id));
+    return remoteResults.searchResult(r, query, cs);
+  }
   const root = projectPath(id);
   if (!root) return null;
   const seq = ++searchSeq;
@@ -1303,6 +1544,27 @@ ipcMain.handle('files:search', async (_e, { id, query, regex, caseSensitive }) =
 let searchAllSeq = 0;
 ipcMain.handle('files:searchAll', async (_e, { query }) => {
   const seq = ++searchAllSeq;
+  // Paired hosts search at the same time as the local projects; their rows come after the local ones.
+  const remoteAsk = typeof query === 'string' && query && query.length <= 200 && remote.hosts().length ? remote.filesSearchAll(query) : null;
+  const local = await searchAllLocal(seq, query);
+  if (!local || !remoteAsk) return local;
+  let { rows, errors } = await remoteAsk;
+  const busy = remoteResults.busyHosts(errors);
+  if (busy.length && seq === searchAllSeq) {
+    // A host that was only busy is asked once more; the retry's rows and errors replace that host's.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    if (seq === searchAllSeq) {
+      const again = await remote.filesSearchAll(query);
+      rows = rows.concat(again.rows.filter((r) => busy.includes(hostOf(r.id))));
+      errors = errors.filter((e) => !busy.includes(e.host)).concat(again.errors.filter((e) => busy.includes(e.host)));
+    }
+  }
+  if (seq !== searchAllSeq) return null; // a newer search took over: no rows, no toast
+  const problem = remoteResults.findErrorText(errors);
+  if (problem) send('toast', problem); // once per search, all failing hosts in one line
+  return remoteResults.mergeFindRows(local, rows);
+});
+async function searchAllLocal(seq, query) {
   const rows = [];
   for (const p of projectList) {
     if (p.missing || seq !== searchAllSeq) continue;
@@ -1312,19 +1574,35 @@ ipcMain.handle('files:searchAll', async (_e, { query }) => {
     for (const hit of r.hits) for (const m of hit.matches.slice(0, 3)) rows.push({ id: p.id, project: p.name, rel: hit.rel, line: m.line, text: m.text });
   }
   return rows.slice(0, 200);
-});
+}
 ipcMain.handle('files:git', async (_e, { id }) => {
+  if (remoteResults.isRemoteId(id)) {
+    const r = await remote.filesGit(id);
+    if (!r || r.error || !r.badges || typeof r.badges !== 'object') return null;
+    const map = {};
+    for (const [k, v] of Object.entries(r.badges)) if (typeof v === 'string' && v.length <= 2) map[k] = v;
+    return map;
+  }
   const root = projectPath(id);
   if (!root) return null;
   const st = await gitOps.status(root);
   return st.repo ? gitOps.badgeMap(st.files, st.prefix) : null;
 });
 ipcMain.on('files:openAt', (_e, { id, rel, line }) => {
+  if (remoteResults.isRemoteId(id)) return openRemoteFile(id, rel, line);
   const file = fileTarget(id, rel);
   if (file && fs.existsSync(file)) openEditor(file, Number(line) || undefined);
 });
 
 ipcMain.on('files:menu', (_e, { id, rel, dir }) => {
+  if (remoteResults.isRemoteId(id)) {
+    if (typeof rel !== 'string' || !win) return;
+    const items = [];
+    if (!dir) items.push({ label: 'Open (read-only)', click: () => openRemoteFile(id, rel) });
+    items.push({ label: 'Copy path', click: () => clipboard.writeText(rel) }); // project-relative: the host's folder is never shown
+    Menu.buildFromTemplate(items).popup({ window: win });
+    return;
+  }
   const file = fileTarget(id, rel);
   if (!file || !win) return;
   const items = [];

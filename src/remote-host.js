@@ -6,18 +6,20 @@ const C = require('./remote-crypto');
 const { createRing } = require('./ring-buffer');
 const { createScanner } = require('./osc-progress');
 const { isListenable } = require('./remote-config');
+const { MAX_QUERY, MAX_CANDIDATES } = require('./remote-files');
 
 const HELLO_TIMEOUT_MS = 10000;
 const LOCK_AFTER = 5;
 const LOCK_MS = 60000;
 const MAX_PENDING = 16; // sockets that have not authenticated yet
 const MAX_INPUT = 65536;
+const MAX_FILE_BUSY = 4; // file requests in flight per client
 class PublicError extends Error {} // only these messages are safe to show a client; anything else may hold host paths
 const dim = (n) => (Number.isInteger(n) && n >= 1 && n <= 500 ? n : undefined);
 
 // getDevices() entries are { id, secret, name? }; name is only used for the log.
 function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSession, openProject, write, resize, restart, closeSession, log = () => {},
-  ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
+  fileService, ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
   const clients = new Set();
   const sockets = new Set(); // every accepted socket, authenticated or not
   const rings = new Map();
@@ -75,6 +77,56 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     close: (c, a) => { if (hasSession(a.id)) closeSession(a.id); return true; }
   };
 
+  // File requests (read-only, see src/remote-files.js). The service validates paths; here we check the argument types
+  // and cap what one client can have in flight. Only these handlers count against the cap.
+  if (fileService) {
+    const invalid = () => new PublicError('That request is not valid');
+    const pathArgs = (a) => typeof a.id === 'string' && (a.rel === undefined || typeof a.rel === 'string');
+    const queryOk = (q) => typeof q === 'string' && q.length > 0 && q.length <= MAX_QUERY;
+    const searchArgs = (a) => typeof a.id === 'string' && queryOk(a.query) && (a.caseSensitive === undefined || typeof a.caseSensitive === 'boolean');
+    const mdArgs = (a) => typeof a.id === 'string' && Array.isArray(a.candidates) && a.candidates.length <= MAX_CANDIDATES && a.candidates.every((x) => typeof x === 'string');
+    const takeSlot = (c) => {
+      if ((c.fileBusy || 0) >= MAX_FILE_BUSY) throw new PublicError('Too many file requests');
+      c.fileBusy = (c.fileBusy || 0) + 1;
+    };
+    const fileCall = (fn, valid = pathArgs) => async (c, a) => {
+      if (!valid(a)) throw invalid();
+      takeSlot(c);
+      try {
+        const r = await fn(a);
+        if (r && r.error) throw new PublicError(r.error);
+        return r;
+      } finally {
+        c.fileBusy -= 1;
+      }
+    };
+    // Like local search, each kind has its own token: a new files.search cancels the client's running files.search, a
+    // new files.searchAll its running files.searchAll; a disconnect cancels both. A cancelled search keeps its slot
+    // until the service call really returns, so a client never has more than 4 live calls, however fast it sends.
+    // A refused request (invalid, regex, too many) cancels nothing.
+    const searchCall = (kind, fn, valid) => async (c, a) => {
+      if (a.regex) throw new PublicError('Regex search is not available on remote projects yet');
+      if (!valid(a)) throw invalid();
+      takeSlot(c);
+      const my = ++c.searchTokens[kind];
+      const isCancelled = () => c.searchTokens[kind] !== my;
+      try {
+        const r = await fn(a, isCancelled);
+        if (isCancelled() || (r && r.cancelled)) throw new PublicError('Search cancelled');
+        if (r && r.error) throw new PublicError(r.error);
+        return r;
+      } finally {
+        c.fileBusy -= 1;
+      }
+    };
+    handlers['files.list'] = fileCall((a) => fileService.list(a.id, a.rel));
+    handlers['files.read'] = fileCall((a) => fileService.read(a.id, a.rel));
+    handlers['files.git'] = fileCall((a) => fileService.git(a.id));
+    handlers['md.resolve'] = fileCall((a) => fileService.resolveMd(a.id, a.candidates), mdArgs);
+    handlers['files.search'] = searchCall('search', (a, isCancelled) => fileService.search(a.id, a.query, { caseSensitive: a.caseSensitive === true }, isCancelled), searchArgs);
+    handlers['files.searchAll'] = searchCall('all', (a, isCancelled) => fileService.searchAll(a.query, isCancelled), (a) => queryOk(a.query));
+  }
+
   async function handle(c, msg) {
     if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
     const reply = (body) => { if (msg.rid !== undefined) sendTo(c, 'res', { rid: msg.rid, ...body }); };
@@ -110,7 +162,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 15000);
     sock.on('error', () => {});
-    const c = { sock, channel: null, dev: null, attached: new Set() };
+    const c = { sock, channel: null, dev: null, attached: new Set(), searchTokens: { search: 0, all: 0 } };
     const hostNonce = C.newNonce();
     let waiting = true;
     let finished = false; // the first handshake line is final, whatever the outcome
@@ -160,7 +212,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
 
     sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel && !finished) noteFailure(addr); sock.destroy(); } });
-    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); if (!clients.size) lastProjects = ''; });
+    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); c.searchTokens.search++; c.searchTokens.all++; if (!clients.size) lastProjects = ''; });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 

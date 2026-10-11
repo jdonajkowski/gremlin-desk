@@ -35,3 +35,27 @@ test('searchProject finds names and contents, skipping ignored folders and binar
   const capped = await searchProject(root, 'e', { maxHits: 1 });
   assert.equal(capped.truncated, true);
 });
+
+test('searchProject: isLate ends the walk with the hits found so far; isCancelled still gives null', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'search-'));
+  for (const d of ['a', 'b', 'c']) {
+    fs.mkdirSync(path.join(root, d));
+    fs.writeFileSync(path.join(root, d, 'x.txt'), 'needle\n');
+  }
+  const all = await searchProject(root, 'needle', { isLate: () => false });
+  assert.equal(all.hits.length, 3);
+  assert.equal(all.truncated, false);
+  let n = 0;
+  const part = await searchProject(root, 'needle', { isLate: () => ++n > 4 });
+  assert.ok(part.hits.length >= 1 && part.hits.length < 3, `partial hits: ${part.hits.length}`);
+  assert.equal(part.hits[0].rel, 'a/x.txt');
+  assert.equal(part.truncated, true);
+  assert.equal(await searchProject(root, 'needle', { isCancelled: () => true, isLate: () => true }), null, 'cancel wins');
+});
+
+test('searchProject: a cancel is seen between files inside one folder, not only between folders', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'search-'));
+  for (let i = 0; i < 5; i++) fs.writeFileSync(path.join(root, `f${i}.txt`), 'needle\n');
+  let n = 0;
+  assert.equal(await searchProject(root, 'needle', { isCancelled: () => ++n > 2 }), null);
+});

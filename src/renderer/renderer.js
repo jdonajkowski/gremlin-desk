@@ -692,7 +692,7 @@
   function renderActive() {
     renderTitle();
     widget.view.setRemote(isRemote(activeId));
-    if (isRemote(activeId)) filesPane.setProject(null, 'Files are not available on remote computers yet.');
+    if (isRemote(activeId)) filesPane.setProject(activeId, '', (projects.find((x) => x.id === activeId) || {}).name || '');
     else filesPane.setProject(activeId);
     renderTabs();
     const t = activeId && terminals.get(activeId);
