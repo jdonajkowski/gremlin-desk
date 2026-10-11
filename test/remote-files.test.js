@@ -205,15 +205,39 @@ test('names starting with two dots are listed and can be opened; real escapes ar
   assert.deepEqual(svc.list('p1', '..jx'), { error: 'That path is not allowed' });
 });
 
-test('read: name is the last requested segment, not the link target name', (t) => {
+test('read: name is the last requested segment, not the resolved target name (injected realpath)', () => {
+  const { root } = setup();
+  fs.writeFileSync(path.join(root, 'real-target.txt'), 'hi');
+  const fake = Object.assign(Object.create(fs), {
+    realpathSync: (p) => (path.basename(p) === 'shown.txt' ? path.join(fs.realpathSync(root), 'real-target.txt') : fs.realpathSync(p))
+  });
+  const s = createFileService({ fs: fake, path, files, projectRoot: () => root });
+  const r = s.read('p1', 'shown.txt');
+  assert.equal(r.name, 'shown.txt');
+  assert.equal(r.rel, 'shown.txt');
+  assert.equal(r.text, 'hi');
+});
+
+test('read: name through a real in-project link is the requested name (skipped where links cannot be created)', (t) => {
   const { svc, root } = setup();
-  try { fs.symlinkSync(path.join(root, 'src'), path.join(root, 'alias'), 'junction'); } catch { return t.skip('no junction'); }
-  const r = svc.read('p1', 'alias/a.js');
-  assert.equal(r.name, 'a.js');
-  fs.mkdirSync(path.join(root, 'real'));
-  fs.writeFileSync(path.join(root, 'real', 'target.txt'), 'hi');
-  try { fs.symlinkSync(path.join(root, 'real', 'target.txt'), path.join(root, 'shown.txt'), 'file'); } catch { return; }
-  const s = svc.read('p1', 'shown.txt');
-  assert.equal(s.name, 'shown.txt');
-  assert.equal(s.rel, 'shown.txt');
+  try { fs.symlinkSync(path.join(root, 'src', 'a.js'), path.join(root, 'shown.js'), 'file'); } catch { return t.skip('this OS refused to create a file symlink'); }
+  const r = svc.read('p1', 'shown.js');
+  assert.equal(r.name, 'shown.js');
+  assert.equal(r.rel, 'shown.js');
+});
+
+test('read: a file that keeps growing past fstat is reported toolarge, never read unbounded', () => {
+  const { root } = setup();
+  let requested = 0;
+  const fake = Object.assign(Object.create(fs), {
+    openSync: () => 99,
+    closeSync: () => {},
+    fstatSync: () => ({ size: 10, mtimeMs: 1, isFile: () => true }),
+    readSync: (fd, buf, off, len) => { requested += len; buf.fill(97, off, off + len); return len; }
+  });
+  const s = createFileService({ fs: fake, path, files, projectRoot: () => root });
+  const r = s.read('p1', 'src/a.js');
+  assert.equal(r.kind, 'toolarge');
+  assert.equal(r.text, undefined);
+  assert.ok(requested <= MAX_VIEW_BYTES + 1, 'never more than the cap + 1 bytes are requested');
 });

@@ -53,17 +53,9 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
     let st;
     try { st = fs.statSync(r.full); } catch { return { error: 'Not found' }; }
     if (!st.isDirectory()) return { error: 'Not a folder' };
-    let dirents;
-    try { dirents = fs.readdirSync(r.full, { withFileTypes: true }); } catch { return { error: 'Cannot read that folder' }; }
-    const out = [];
-    for (const e of dirents) {
-      const isDir = e.isDirectory();
-      if (!isDir && !e.isFile()) continue;
-      if (isDir && files.IGNORED.has(e.name)) continue;
-      out.push({ name: e.name, rel: r.clean ? `${r.clean}/${e.name}` : e.name, dir: isDir });
-    }
-    const cmp = (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase());
-    const entries = [...out.filter((e) => e.dir).sort(cmp), ...out.filter((e) => !e.dir).sort(cmp)];
+    const listed = files.listDir(r.full, '');
+    if (!listed) return { error: 'Cannot read that folder' };
+    const entries = listed.map((e) => ({ ...e, rel: r.clean ? r.clean + '/' + e.name : e.name }));
     return { entries: entries.slice(0, MAX_ENTRIES), truncated: entries.length > MAX_ENTRIES };
   }
 
@@ -81,9 +73,11 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
       const fst = fs.fstatSync(fd);
       const head = { rel: r.clean, name, size: fst.size, mtimeMs: fst.mtimeMs };
       if (fst.size > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
-      const buf = Buffer.alloc(MAX_VIEW_BYTES + 1);
+      // Sized from fstat (small files stay cheap); if the file grew meanwhile, grow the buffer but never past the cap + 1.
+      let buf = Buffer.alloc(Math.min(fst.size, MAX_VIEW_BYTES) + 1);
       let n = 0;
-      while (n < buf.length) {
+      while (n < MAX_VIEW_BYTES + 1) {
+        if (n === buf.length) { const bigger = Buffer.alloc(MAX_VIEW_BYTES + 1); buf.copy(bigger, 0, 0, n); buf = bigger; }
         const got = fs.readSync(fd, buf, n, buf.length - n, n);
         if (!got) break;
         n += got;
@@ -91,7 +85,7 @@ function createFileService({ fs, path, files, projectRoot, gitOps }) {
       if (n > MAX_VIEW_BYTES) return { ...head, kind: 'toolarge' };
       const bytes = buf.subarray(0, n);
       if (bytes.subarray(0, 8192).includes(0)) return { ...head, kind: 'binary' };
-      return { ...head, kind: MD.test(name) ? 'md' : 'text', text: bytes.toString('utf8').replace(/^﻿/, '') };
+      return { ...head, kind: MD.test(name) ? 'md' : 'text', text: bytes.toString('utf8').replace(/^\ufeff/, '') };
     } catch {
       return { error: 'Not found' };
     } finally {
