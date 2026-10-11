@@ -6,6 +6,7 @@ const C = require('./remote-crypto');
 const { createRing } = require('./ring-buffer');
 const { createScanner } = require('./osc-progress');
 const { isListenable } = require('./remote-config');
+const { MAX_QUERY, MAX_CANDIDATES } = require('./remote-files');
 
 const HELLO_TIMEOUT_MS = 10000;
 const LOCK_AFTER = 5;
@@ -79,10 +80,18 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
   // File requests (read-only, see src/remote-files.js). The service validates paths; here we check the argument types
   // and cap what one client can have in flight. Only these handlers count against the cap.
   if (fileService) {
-    const fileCall = (fn) => async (c, a) => {
-      if (typeof a.id !== 'string' || (a.rel !== undefined && typeof a.rel !== 'string')) throw new PublicError('That request is not valid');
+    const invalid = () => new PublicError('That request is not valid');
+    const pathArgs = (a) => typeof a.id === 'string' && (a.rel === undefined || typeof a.rel === 'string');
+    const queryOk = (q) => typeof q === 'string' && q.length > 0 && q.length <= MAX_QUERY;
+    const searchArgs = (a) => typeof a.id === 'string' && queryOk(a.query) && (a.caseSensitive === undefined || typeof a.caseSensitive === 'boolean');
+    const mdArgs = (a) => typeof a.id === 'string' && Array.isArray(a.candidates) && a.candidates.length <= MAX_CANDIDATES && a.candidates.every((x) => typeof x === 'string');
+    const takeSlot = (c) => {
       if ((c.fileBusy || 0) >= MAX_FILE_BUSY) throw new PublicError('Too many file requests');
       c.fileBusy = (c.fileBusy || 0) + 1;
+    };
+    const fileCall = (fn, valid = pathArgs) => async (c, a) => {
+      if (!valid(a)) throw invalid();
+      takeSlot(c);
       try {
         const r = await fn(a);
         if (r && r.error) throw new PublicError(r.error);
@@ -91,9 +100,36 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
         c.fileBusy -= 1;
       }
     };
+    // One running search per client (files.search and files.searchAll share it): a new one bumps c.searchToken, which
+    // cancels the old one, and frees the old one's slot at once, so a cancelled search that is still unwinding (a slow
+    // read, say) never makes the new one "Too many file requests". A disconnect bumps the token too.
+    const searchCall = (fn, valid) => async (c, a) => {
+      if (a.regex) throw new PublicError('Regex search is not available on remote projects yet');
+      if (!valid(a)) throw invalid();
+      const my = ++c.searchToken;
+      const prev = c.search;
+      if (prev && !prev.freed) { prev.freed = true; c.fileBusy -= 1; }
+      c.search = null;
+      takeSlot(c);
+      const run = { freed: false };
+      c.search = run;
+      const isCancelled = () => c.searchToken !== my;
+      try {
+        const r = await fn(a, isCancelled);
+        if (isCancelled() || (r && r.cancelled)) throw new PublicError('Search cancelled');
+        if (r && r.error) throw new PublicError(r.error);
+        return r;
+      } finally {
+        if (!run.freed) { run.freed = true; c.fileBusy -= 1; }
+        if (c.search === run) c.search = null;
+      }
+    };
     handlers['files.list'] = fileCall((a) => fileService.list(a.id, a.rel));
     handlers['files.read'] = fileCall((a) => fileService.read(a.id, a.rel));
     handlers['files.git'] = fileCall((a) => fileService.git(a.id));
+    handlers['md.resolve'] = fileCall((a) => fileService.resolveMd(a.id, a.candidates), mdArgs);
+    handlers['files.search'] = searchCall((a, isCancelled) => fileService.search(a.id, a.query, { caseSensitive: a.caseSensitive === true }, isCancelled), searchArgs);
+    handlers['files.searchAll'] = searchCall((a, isCancelled) => fileService.searchAll(a.query, isCancelled), (a) => queryOk(a.query));
   }
 
   async function handle(c, msg) {
@@ -131,7 +167,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 15000);
     sock.on('error', () => {});
-    const c = { sock, channel: null, dev: null, attached: new Set() };
+    const c = { sock, channel: null, dev: null, attached: new Set(), searchToken: 0, search: null };
     const hostNonce = C.newNonce();
     let waiting = true;
     let finished = false; // the first handshake line is final, whatever the outcome
@@ -181,7 +217,7 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     }
 
     sock.on('data', (chunk) => { try { reader.feed(chunk); } catch { if (!c.channel && !finished) noteFailure(addr); sock.destroy(); } });
-    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); if (!clients.size) lastProjects = ''; });
+    sock.on('close', () => { sockets.delete(sock); clearTimeout(timer); done(); clients.delete(c); c.searchToken++; if (!clients.size) lastProjects = ''; });
     sock.write(JSON.stringify({ t: 'hello', v: C.VERSION, nonce: hostNonce }) + '\n');
   }
 

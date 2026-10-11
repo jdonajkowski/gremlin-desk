@@ -575,3 +575,198 @@ test('files: without a file service the requests are unknown', async () => {
   c.close();
   await s.host.close();
 });
+
+// A search fake that waits until released or cancelled, so a test controls when it ends.
+function hangingSearch(log) {
+  return (label) => async (...args) => {
+    const isCancelled = args[args.length - 1];
+    const entry = { label, args: args.slice(0, -1), sawCancel: false, release: null };
+    log.push(entry);
+    let tick;
+    await new Promise((res) => {
+      entry.release = res;
+      tick = setInterval(() => { if (isCancelled()) { entry.sawCancel = true; res(); } }, 5);
+    });
+    clearInterval(tick);
+    return isCancelled() ? { cancelled: true } : { files: [], hits: [{ rel: label }], truncated: false };
+  };
+}
+
+test('files.search, files.searchAll and md.resolve pass their arguments through and return the service data', async () => {
+  const calls = [];
+  const s = await started({ fileService: fakeFiles({
+    search: async (id, query, opts, isCancelled) => { calls.push(['search', id, query, opts, typeof isCancelled]); return { files: [{ rel: 'a' }], hits: [], truncated: false }; },
+    searchAll: async (query, isCancelled) => { calls.push(['searchAll', query, typeof isCancelled]); return { rows: [{ id: 'p1', project: 'one', rel: 'a', line: 1, text: 'x' }] }; },
+    resolveMd: (id, candidates) => { calls.push(['resolveMd', id, candidates]); return candidates[0] === 'none.md' ? null : { index: 0, rel: 'README.md' }; }
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  assert.deepEqual((await c.request('files.search', { id: 'p1', query: 'foo', caseSensitive: true })).data, { files: [{ rel: 'a' }], hits: [], truncated: false });
+  assert.equal((await c.request('files.search', { id: 'p1', query: 'foo' })).ok, true, 'caseSensitive may be left out');
+  assert.equal((await c.request('files.searchAll', { query: 'foo' })).data.rows[0].rel, 'a');
+  assert.deepEqual((await c.request('md.resolve', { id: 'p1', candidates: ['README.md'] })).data, { index: 0, rel: 'README.md' });
+  assert.deepEqual(await c.request('md.resolve', { id: 'p1', candidates: ['none.md'] }), { t: 'res', rid: c.rid, ok: true, data: null });
+  assert.deepEqual(calls, [
+    ['search', 'p1', 'foo', { caseSensitive: true }, 'function'],
+    ['search', 'p1', 'foo', { caseSensitive: false }, 'function'],
+    ['searchAll', 'foo', 'function'],
+    ['resolveMd', 'p1', ['README.md']],
+    ['resolveMd', 'p1', ['none.md']]
+  ]);
+  c.close();
+  await s.host.close();
+});
+
+test('search and md.resolve: hostile arguments are refused before the service is called', async () => {
+  const calls = [];
+  const s = await started({ fileService: fakeFiles({
+    search: async () => { calls.push('search'); return { files: [], hits: [], truncated: false }; },
+    searchAll: async () => { calls.push('searchAll'); return { rows: [] }; },
+    resolveMd: () => { calls.push('resolveMd'); return null; }
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  const badSearch = [{ id: 'p1' }, { id: 'p1', query: 5 }, { id: 'p1', query: {} }, { id: 'p1', query: ['a'] }, { id: 'p1', query: null }, { id: 'p1', query: '' },
+    { id: 'p1', query: 'x'.repeat(300) }, { id: 5, query: 'a' }, { query: 'a' }, { id: 'p1', query: 'a', caseSensitive: 'yes' }, { id: 'p1', query: 'a', caseSensitive: 1 }];
+  for (const args of badSearch) {
+    const r = await c.request('files.search', args);
+    assert.equal(r.ok, false, JSON.stringify(args).slice(0, 60));
+    assert.equal(r.error, 'That request is not valid');
+  }
+  for (const args of [{}, { query: 5 }, { query: {} }, { query: '' }, { query: 'x'.repeat(300) }]) {
+    const r = await c.request('files.searchAll', args);
+    assert.equal(r.ok, false, JSON.stringify(args).slice(0, 60));
+    assert.equal(r.error, 'That request is not valid');
+  }
+  const badMd = [{ id: 'p1' }, { id: 'p1', candidates: 'a.md' }, { id: 'p1', candidates: { 0: 'a.md' } }, { id: 'p1', candidates: null },
+    { id: 'p1', candidates: Array(17).fill('a.md') }, { id: 'p1', candidates: ['a.md', 5] }, { id: 5, candidates: ['a.md'] }, { candidates: ['a.md'] }];
+  for (const args of badMd) {
+    const r = await c.request('md.resolve', args);
+    assert.equal(r.ok, false, JSON.stringify(args).slice(0, 60));
+    assert.equal(r.error, 'That request is not valid');
+  }
+  assert.deepEqual(calls, []);
+  assert.equal((await c.request('md.resolve', { id: 'p1', candidates: Array(16).fill('a.md') })).ok, true, '16 candidates are fine');
+  assert.equal((await c.request('files.search', { id: 'p1', query: 'x'.repeat(200) })).ok, true, '200 characters are fine');
+  assert.equal(c.closed, false);
+  c.close();
+  await s.host.close();
+});
+
+test('search: regex is refused before the service is called, whatever the other arguments', async () => {
+  const calls = [];
+  const s = await started({ fileService: fakeFiles({
+    search: async () => { calls.push('search'); return { files: [], hits: [], truncated: false }; },
+    searchAll: async () => { calls.push('searchAll'); return { rows: [] }; }
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  for (const [t, args] of [['files.search', { id: 'p1', query: 'a', regex: true }], ['files.search', { id: 'p1', query: 'a', regex: 1 }],
+    ['files.search', { id: 5, query: 'a', regex: 'yes' }], ['files.searchAll', { query: 'a', regex: true }]]) {
+    const r = await c.request(t, args);
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'Regex search is not available on remote projects yet');
+  }
+  assert.deepEqual(calls, []);
+  assert.equal((await c.request('files.search', { id: 'p1', query: 'a', regex: false })).ok, true, 'regex false is a literal search');
+  c.close();
+  await s.host.close();
+});
+
+test('search: a second search from the same client cancels the first, which replies Search cancelled', async () => {
+  const log = [];
+  const h = hangingSearch(log);
+  const s = await started({ fileService: fakeFiles({ search: h('search'), searchAll: h('all') }) });
+  const c = await connect(s.port);
+  const d = await connect(s.port);
+  await c.next();
+  await d.next();
+  c.send({ t: 'files.search', rid: 1, id: 'p1', query: 'a' });
+  await waitFor(() => log.length === 1);
+  d.send({ t: 'files.search', rid: 1, id: 'p1', query: 'other client' });
+  await waitFor(() => log.length === 2);
+  c.send({ t: 'files.searchAll', rid: 2, query: 'b' });
+  const first = await c.until((m) => m.t === 'res' && m.rid === 1);
+  assert.equal(first.ok, false);
+  assert.equal(first.error, 'Search cancelled');
+  await waitFor(() => log.length === 3);
+  assert.equal(log[1].sawCancel, false, 'another client\'s search is not touched');
+  log[2].release();
+  log[1].release();
+  assert.equal((await c.until((m) => m.t === 'res' && m.rid === 2)).ok, true);
+  assert.equal((await d.until((m) => m.t === 'res' && m.rid === 1)).ok, true);
+  c.close();
+  d.close();
+  await s.host.close();
+});
+
+test('search: a cancelled search that is still unwinding does not take a slot from the new one', async () => {
+  const releases = [];
+  let unstick = null;
+  let searches = 0;
+  const s = await started({ fileService: fakeFiles({
+    read: () => new Promise((res) => releases.push(() => res({ text: 'ok' }))),
+    search: async (id, query) => {
+      searches++;
+      if (query === 'stuck') { // ignores the token for a while, like a slow disk read
+        await new Promise((res) => { unstick = res; });
+        return { files: [], hits: [], truncated: false };
+      }
+      return { files: [{ rel: 'new' }], hits: [], truncated: false };
+    }
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  for (let i = 0; i < 3; i++) c.send({ t: 'files.read', rid: 100 + i, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 3);
+  c.send({ t: 'files.search', rid: 1, id: 'p1', query: 'stuck' });
+  await waitFor(() => searches === 1);
+  const fresh = await c.request('files.search', { id: 'p1', query: 'new' });
+  assert.equal(fresh.ok, true, fresh.error);
+  assert.deepEqual(fresh.data.files, [{ rel: 'new' }]);
+  unstick();
+  const first = await c.until((m) => m.t === 'res' && m.rid === 1);
+  assert.equal(first.error, 'Search cancelled', 'finished after being cancelled: still reported as cancelled');
+  // The stuck search's slot was not freed twice: 3 reads in flight leave exactly one slot.
+  c.send({ t: 'files.read', rid: 104, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 4);
+  assert.equal((await c.request('files.read', { id: 'p1', rel: 'f' })).error, 'Too many file requests');
+  releases.forEach((r) => r());
+  c.close();
+  await s.host.close();
+});
+
+test('search: searches count toward the 4 in flight per client', async () => {
+  const releases = [];
+  const s = await started({ fileService: fakeFiles({
+    read: () => new Promise((res) => releases.push(() => res({ text: 'ok' }))),
+    search: async () => ({ files: [], hits: [], truncated: false }),
+    resolveMd: () => null
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  for (let i = 0; i < 4; i++) c.send({ t: 'files.read', rid: 100 + i, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 4);
+  assert.equal((await c.request('files.search', { id: 'p1', query: 'a' })).error, 'Too many file requests');
+  assert.equal((await c.request('files.searchAll', { query: 'a' })).error, 'Too many file requests');
+  assert.equal((await c.request('md.resolve', { id: 'p1', candidates: [] })).error, 'Too many file requests');
+  releases[0]();
+  await c.until((m) => m.t === 'res' && m.rid === 100);
+  assert.equal((await c.request('files.search', { id: 'p1', query: 'a' })).ok, true);
+  releases.slice(1).forEach((f) => f());
+  c.close();
+  await s.host.close();
+});
+
+test('search: a client disconnecting cancels its running search', async () => {
+  const log = [];
+  const s = await started({ fileService: fakeFiles({ search: hangingSearch(log)('search') }) });
+  const c = await connect(s.port);
+  await c.next();
+  c.send({ t: 'files.search', rid: 1, id: 'p1', query: 'a' });
+  await waitFor(() => log.length === 1);
+  c.close();
+  await waitFor(() => log[0].sawCancel);
+  await waitFor(() => s.host.status().clients === 0);
+  await s.host.close();
+});

@@ -293,3 +293,95 @@ test('file requests for unknown hosts, non-remote ids and hostile arguments reso
   }
   assert.ok(c.reqs.every((r) => !('rel' in r[1])));
 });
+
+test('filesSearch and mdResolve ask the host with the host-side id and return its data', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  c.reply = { files: [], hits: [], truncated: false };
+  assert.deepEqual(await t.m.filesSearch('r:desk/c:\p\a', 'foo', { caseSensitive: true }), c.reply);
+  await t.m.filesSearch('r:desk/p', 'foo');
+  await t.m.filesSearch('r:desk/p', 'foo', { caseSensitive: 'yes', extra: 1 });
+  c.reply = null;
+  assert.equal(await t.m.mdResolve('r:desk/p', ['a.md']), null, 'no match is null, not an error');
+  c.reply = { index: 0, rel: 'a.md' };
+  assert.deepEqual(await t.m.mdResolve('r:desk/p', ['a.md']), { index: 0, rel: 'a.md' });
+  assert.deepEqual(c.reqs, [
+    ['files.search', { id: 'c:\p\a', query: 'foo', caseSensitive: true }],
+    ['files.search', { id: 'p', query: 'foo', caseSensitive: false }],
+    ['files.search', { id: 'p', query: 'foo', caseSensitive: false }],
+    ['md.resolve', { id: 'p', candidates: ['a.md'] }],
+    ['md.resolve', { id: 'p', candidates: ['a.md'] }]
+  ]);
+});
+
+test('filesSearch refuses regex locally, and search and mdResolve errors never reject', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  assert.deepEqual(await t.m.filesSearch('r:desk/p', 'a'), { error: 'Host is not connected' });
+  assert.deepEqual(await t.m.mdResolve('r:desk/p', ['a.md']), { error: 'Host is not connected' });
+  assert.deepEqual(await t.m.filesSearch('r:nohost/p', 'a'), { error: 'Host is not connected' });
+  online(c);
+  assert.deepEqual(await t.m.filesSearch('r:desk/p', 'a', { regex: true }), { error: 'Regex search is not available on remote projects yet' });
+  assert.deepEqual(c.reqs, []);
+  c.request = async () => { throw Object.assign(new Error('Search cancelled'), { fromHost: true }); };
+  assert.deepEqual(await t.m.filesSearch('r:desk/p', 'a'), { error: 'Search cancelled' });
+  c.request = async () => { throw new Error('boom'); };
+  assert.deepEqual(await t.m.mdResolve('r:desk/p', ['a.md']), { error: 'The request failed' });
+});
+
+test('filesSearch and mdResolve pass hostile arguments to the host unchanged, for it to refuse', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  await t.m.filesSearch('r:desk/p', 5);
+  await t.m.filesSearch('r:desk/p', 'x'.repeat(300));
+  await t.m.mdResolve('r:desk/p', 'a.md');
+  await t.m.mdResolve('r:desk/p', Array(17).fill('a.md'));
+  assert.deepEqual(c.reqs.map((r) => [r[0], typeof (r[1].query ?? r[1].candidates)]), [['files.search', 'number'], ['files.search', 'string'], ['md.resolve', 'string'], ['md.resolve', 'object']]);
+});
+
+test('filesSearchAll asks every online host at once, namespaces the row ids and reports each host error', async () => {
+  const hosts = [HOSTS[0], { id: 'lap', name: 'Laptop', address: 'b', port: 2 }, { id: 'off', name: 'Off', address: 'c', port: 3 }];
+  const t = setup(hosts);
+  assert.deepEqual(await t.m.filesSearchAll('foo'), { rows: [], errors: [] }, 'no host online');
+  online(t.made.desk);
+  online(t.made.lap);
+  const pending = [];
+  t.made.desk.request = (tt, a) => { t.made.desk.reqs.push([tt, a]); return new Promise((res) => pending.push(() => res({ rows: [
+    { id: 'c:\p\a', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
+    { id: 'c:\p\a', project: 'A', rel: 'y.md', line: 0, text: '' },
+    { id: 5, project: 'bad', rel: 'z', line: 1, text: 't' },
+    null,
+    { id: 'q', project: 'Q', rel: { evil: 1 }, line: 1, text: 't' },
+    { id: 'q', project: 7, rel: 'r', line: 'x', text: 9 }
+  ] }))); };
+  t.made.lap.request = async (tt, a) => { t.made.lap.reqs.push([tt, a]); throw Object.assign(new Error('Search cancelled'), { fromHost: true }); };
+  const p = t.m.filesSearchAll('foo');
+  await new Promise((r) => setImmediate(r));
+  assert.equal(t.made.lap.reqs.length, 1, 'the second host is asked before the first answers');
+  pending[0]();
+  const r = await p;
+  assert.deepEqual(r.rows, [
+    { id: 'r:desk/c:\p\a', project: 'A', rel: 'x.md', line: 3, text: 'foo' },
+    { id: 'r:desk/c:\p\a', project: 'A', rel: 'y.md', line: 0, text: '' },
+    { id: 'r:desk/q', project: '', rel: 'r', line: 0, text: '' }
+  ]);
+  assert.deepEqual(r.errors, [{ host: 'lap', name: 'Laptop', message: 'Search cancelled' }]);
+  assert.deepEqual(t.made.desk.reqs, [['files.searchAll', { query: 'foo' }]]);
+  assert.deepEqual(t.made.off.reqs, [], 'offline host is not asked');
+});
+
+test('filesSearchAll keeps at most 200 rows per host and survives a malformed reply', async () => {
+  const t = setup([HOSTS[0], { id: 'lap', name: 'Laptop', address: 'b', port: 2 }]);
+  online(t.made.desk);
+  online(t.made.lap);
+  t.made.desk.reply = { rows: Array.from({ length: 300 }, (_, i) => ({ id: 'p', project: 'P', rel: 'f' + i, line: i, text: '' })) };
+  t.made.lap.reply = 'not an object';
+  const r = await t.m.filesSearchAll('foo');
+  assert.equal(r.rows.length, 200);
+  assert.deepEqual(r.errors, []);
+  t.made.desk.request = async () => { throw new Error('The other computer did not answer'); };
+  t.made.lap.reply = { rows: 'nope' };
+  assert.deepEqual(await t.m.filesSearchAll('foo'), { rows: [], errors: [{ host: 'desk', name: 'Desk PC', message: 'The other computer did not answer' }] });
+});
