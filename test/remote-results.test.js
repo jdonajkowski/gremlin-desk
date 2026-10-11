@@ -86,3 +86,17 @@ test('resolvedMd accepts only an in-range index and a project-relative Markdown 
     { index: 0, rel: 'C:/a.md' }, { index: 0, rel: 'a\\b.md' }, { index: 0, rel: 'a.txt' }, { index: 0, rel: 'a//b.md' }, { index: 0, rel: 'a\0.md' }
   ]) assert.strictEqual(R.resolvedMd(bad, 3), null, JSON.stringify(bad));
 });
+
+test('isRemoteId matches a host namespace whether or not the host is still paired, never a local path', () => {
+  for (const id of ['r:hostbox/c:\\users\\me\\proj', 'r:box-2//home/me/proj', 'r:gone/x']) assert.strictEqual(R.isRemoteId(id), true, id);
+  for (const id of ['r:\\work\\proj', 'r:/work', 'c:\\users\\me\\proj', '/home/me/proj', 'R:HOST/x', 'r:', '', null, undefined, 5, {}]) {
+    assert.strictEqual(R.isRemoteId(id), false, String(id));
+  }
+});
+
+test('searchResult marks a reply truncated when it drops file-name rows past 200', () => {
+  const r = R.searchResult({ files: Array.from({ length: 201 }, (_, i) => ({ rel: `f${i}` })), hits: [], truncated: false }, 'f', false);
+  assert.strictEqual(r.files.length, 200);
+  assert.strictEqual(r.truncated, true);
+  assert.strictEqual(R.searchResult({ files: [{ rel: 'a' }], hits: [] }, 'a', false).truncated, false);
+});

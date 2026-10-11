@@ -2,6 +2,12 @@
 // sessions but not to be well-formed: keep only what the files pane, the Ctrl+Shift+H list and the link provider can
 // safely read. Pure, so the tests can feed it odd replies.
 const { MAX_REL, MAX_CANDIDATES } = require('./remote-files');
+const { parseNsId } = require('./remote-config');
+
+// An id in a paired host's namespace (r:<host>/<id>), whether or not that host is still paired. Handlers branch on this,
+// not on the host being known, so a removed host's ids never reach this computer's files. A local project on drive R:
+// (r:\...) does not match: the host part allows only [a-z0-9-] before the slash.
+const isRemoteId = (id) => !!parseNsId(id);
 
 const MAX_ROWS = 200; // Ctrl+Shift+H, local and remote rows together
 const MAX_FILES = 200;
@@ -25,11 +31,11 @@ function matchCol(text, query, caseSensitive) {
 // A files.search reply as the files pane renders a local one ({ root, files, hits, truncated }), or null.
 function searchResult(reply, query, caseSensitive) {
   if (!isObj(reply)) return null;
-  const files = (Array.isArray(reply.files) ? reply.files : [])
-    .filter((f) => isObj(f) && isRel(f.rel)).slice(0, MAX_FILES).map((f) => ({ rel: f.rel }));
+  const named = (Array.isArray(reply.files) ? reply.files : []).filter((f) => isObj(f) && isRel(f.rel));
+  const files = named.slice(0, MAX_FILES).map((f) => ({ rel: f.rel }));
   const hits = [];
   let left = MAX_HITS;
-  let cut = false;
+  let cut = named.length > MAX_FILES;
   for (const h of Array.isArray(reply.hits) ? reply.hits : []) {
     if (left <= 0) { cut = true; break; }
     if (!isObj(h) || !isRel(h.rel) || !Array.isArray(h.matches)) continue;
@@ -97,4 +103,4 @@ function resolvedMd(reply, count) {
   return { index, rel };
 }
 
-module.exports = { MAX_ROWS, CANCELLED, BUSY, matchCol, searchResult, mergeFindRows, findErrorText, busyHosts, mdCandidates, isMdRel, resolvedMd };
+module.exports = { isRemoteId, MAX_ROWS, CANCELLED, BUSY, matchCol, searchResult, mergeFindRows, findErrorText, busyHosts, mdCandidates, isMdRel, resolvedMd };

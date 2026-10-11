@@ -1140,18 +1140,21 @@ function resolveRemoteMd(id, candidates) {
   const cached = remoteMdCache.get(key);
   if (cached && now - cached.at < 5000) return cached.hit;
   if (remoteMdCache.size > 200) for (const [k, v] of remoteMdCache) if (now - v.at >= 5000) remoteMdCache.delete(k);
-  const hit = retryBusy(() => remote.mdResolve(id, sent)).then((r) => {
+  const entry = { at: now, hit: null };
+  entry.hit = retryBusy(() => remote.mdResolve(id, sent)).then((r) => {
     const ok = remoteResults.resolvedMd(r, sent.length);
-    if (!ok && r && r.error) remoteMdCache.delete(key); // an error (host offline, busy) is not an answer: ask again next time
+    // An error (host offline, busy) is not an answer: ask again next time, unless a newer entry already replaced this one.
+    if (!ok && r && r.error && remoteMdCache.get(key) === entry) remoteMdCache.delete(key);
     return ok && { index: ok.index, file: ok.rel };
   });
-  remoteMdCache.set(key, { at: now, hit });
-  return hit;
+  remoteMdCache.set(key, entry);
+  return entry.hit;
 }
 
 // Candidates come from md-links.js, longest first; the first one that is an existing file wins.
 ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
-  if (remote.has(id)) return resolveRemoteMd(id, candidates); // never a toast: this runs on hover
+  // Any r: id is the host's, even when that host was removed meanwhile: never resolved against this computer's disk.
+  if (remoteResults.isRemoteId(id)) return remote.has(id) ? resolveRemoteMd(id, candidates) : null; // never a toast: this runs on hover
   if (!Array.isArray(candidates)) return null;
   for (let i = 0; i < candidates.length && i < 16; i++) {
     const file = findMd(candidates[i], owner(id));
@@ -1161,7 +1164,7 @@ ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
 });
 ipcMain.on('md:open', (_e, { file: p, id }) => {
   // A remote link opens the host's file (a project-relative path md.resolve gave) in the remote popout, never a local one.
-  if (remote.has(id)) return remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
+  if (remoteResults.isRemoteId(id)) return remote.has(id) && remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
   const file = findMd(p, owner(id));
   if (file) openMd(file);
 });
@@ -1453,7 +1456,7 @@ const control = config.browserControl === false ? null : createControl({ browser
 // Files pane: browse the active project's folder
 // ---------------------------------------------------------------------------
 function projectPath(id) {
-  if (!id) return null;
+  if (!id || remoteResults.isRemoteId(id)) return null; // a host's project (paired or removed) never maps to a folder here
   const p = projectList.find((x) => x.id === id);
   return (p && !p.missing && p.path) || (sessions.has(id) ? sessions.cwd(id) : null);
 }
@@ -1464,7 +1467,7 @@ ipcMain.on('files:setOpen', (_e, open) => {
 });
 
 ipcMain.handle('files:list', async (_e, { id, rel }) => {
-  if (remote.has(id)) {
+  if (remoteResults.isRemoteId(id)) {
     const r = await remote.filesList(id, rel);
     if (!r || r.error || !Array.isArray(r.entries)) { toastOnce(id, (r && r.error) || 'The request failed'); return null; }
     remoteToasted.delete(hostOf(id));
@@ -1483,7 +1486,7 @@ function fileTarget(id, rel) {
 // Click: Markdown opens in the viewer, other text files in the editor, runnable binaries are shown in
 // Explorer, the rest open in their default app.
 ipcMain.on('files:open', (_e, { id, rel }) => {
-  if (remote.has(id)) return openRemoteFile(id, rel);
+  if (remoteResults.isRemoteId(id)) return openRemoteFile(id, rel);
   const file = fileTarget(id, rel);
   if (!file || !fs.existsSync(file)) return;
   const action = files.openAction(file, files.isTextFile);
@@ -1495,13 +1498,22 @@ ipcMain.on('files:open', (_e, { id, rel }) => {
 });
 
 let searchSeq = 0;
+let remoteSearchSeq = 0; // one for all hosts: the pane runs one search at a time
 ipcMain.handle('files:search', async (_e, { id, query, regex, caseSensitive }) => {
-  if (remote.has(id)) {
-    // Literal only (the pane hides its regex toggle for remote projects). A replaced or briefly refused search is quiet.
+  if (remoteResults.isRemoteId(id)) {
+    // Literal only (the pane hides its regex toggle for remote projects). A search a newer one replaced is quiet (null).
     if (regex || typeof query !== 'string' || !query || query.length > 200) return null;
+    const seq = ++remoteSearchSeq;
     const cs = caseSensitive === true;
-    const r = await retryBusy(() => remote.filesSearch(id, query, { caseSensitive: cs }));
-    if (r && (r.error === remoteResults.CANCELLED || r.error === remoteResults.BUSY)) return null;
+    const ask = () => remote.filesSearch(id, query, { caseSensitive: cs });
+    let r = await ask();
+    if (r && r.error === remoteResults.BUSY) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      if (seq !== remoteSearchSeq) return null; // retrying now would cancel the newer search at the host
+      r = await ask();
+    }
+    if (seq !== remoteSearchSeq) return null;
+    if (r && r.error === remoteResults.BUSY) return { error: 'The other computer is busy, try again' };
     if (!r || r.error) return { error: (r && r.error) || 'The request failed' };
     remoteToasted.delete(hostOf(id));
     return remoteResults.searchResult(r, query, cs);
@@ -1548,7 +1560,7 @@ async function searchAllLocal(seq, query) {
   return rows.slice(0, 200);
 }
 ipcMain.handle('files:git', async (_e, { id }) => {
-  if (remote.has(id)) {
+  if (remoteResults.isRemoteId(id)) {
     const r = await remote.filesGit(id);
     if (!r || r.error || !r.badges || typeof r.badges !== 'object') return null;
     const map = {};
@@ -1561,13 +1573,13 @@ ipcMain.handle('files:git', async (_e, { id }) => {
   return st.repo ? gitOps.badgeMap(st.files, st.prefix) : null;
 });
 ipcMain.on('files:openAt', (_e, { id, rel, line }) => {
-  if (remote.has(id)) return openRemoteFile(id, rel, line);
+  if (remoteResults.isRemoteId(id)) return openRemoteFile(id, rel, line);
   const file = fileTarget(id, rel);
   if (file && fs.existsSync(file)) openEditor(file, Number(line) || undefined);
 });
 
 ipcMain.on('files:menu', (_e, { id, rel, dir }) => {
-  if (remote.has(id)) {
+  if (remoteResults.isRemoteId(id)) {
     if (typeof rel !== 'string' || !win) return;
     const items = [];
     if (!dir) items.push({ label: 'Open (read-only)', click: () => openRemoteFile(id, rel) });
