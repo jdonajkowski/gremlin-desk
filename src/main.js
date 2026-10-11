@@ -1417,8 +1417,10 @@ async function openRemoteFile(id, rel, line) {
   const problem = remoteProblem(res);
   if (!(res && res.error)) remoteToasted.delete(hostOf(id));
   if (problem) return send('toast', problem);
-  if (res.kind === 'md') openRemoteMd(id, rel, res);
-  else openRemoteEditor(id, rel, res.text, Number(line) > 0 ? Number(line) : undefined);
+  // A search hit (a line) opens the editor at that line even for Markdown, like a local hit; otherwise Markdown is rendered.
+  const at = Number(line) > 0 ? Number(line) : undefined;
+  if (res.kind === 'md' && !at) openRemoteMd(id, rel, res);
+  else openRemoteEditor(id, rel, res.text, at);
 }
 
 // A link clicked in a remote popout: web links go to this computer's browser, relative Markdown links open from the same host.
