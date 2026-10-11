@@ -23,6 +23,7 @@
     const searchHint = qEl.placeholder;
     let regex = false;
     let caseSensitive = false;
+    let remote = false; // the project is on a paired host
 
     const openDirs = () => {
       if (!expanded.has(projectId)) expanded.set(projectId, new Set());
@@ -147,6 +148,7 @@
       const res = await widget.files.search(projectId, q, { regex, caseSensitive });
       if (seq !== renderSeq || q !== query) return;
       if (!res) return swapIn(frag, regex ? 'Invalid pattern' : 'No results');
+      if (res.error) return swapIn(frag, `Search failed: ${res.error}`); // a remote host that could not answer
       // The match length for highlighting: plain text is the query; a regex is measured per line.
       const lenAt = (text, col) => {
         if (!regex) return q.length;
@@ -247,12 +249,16 @@
       return render();
     }
 
-    // Search is not available for remote projects yet: the box says so and stays disabled.
-    function setSearchEnabled(on) {
-      qEl.disabled = regexBtn.disabled = caseBtn.disabled = !on;
-      qEl.placeholder = on ? searchHint : 'Remote search comes next';
-      qEl.title = on ? '' : 'Search on remote projects comes next';
-      if (!on) { qEl.value = ''; query = ''; }
+    // Remote projects search plain text only (the host never runs a regex): the .* toggle is hidden and off there,
+    // and comes back as it was for a local project.
+    let localRegex = false;
+    function setRemoteSearch(isRemote) {
+      if (isRemote === remote) return;
+      remote = isRemote;
+      if (remote) { localRegex = regex; regex = false; } else regex = localRegex;
+      regexBtn.hidden = regexBtn.disabled = remote;
+      regexBtn.classList.toggle('on', regex);
+      qEl.placeholder = remote ? 'Search (plain text)' : searchHint;
     }
 
     // notice: shown instead of "No project open" when there is no project to list.
@@ -262,7 +268,7 @@
       projectId = id;
       notice = text;
       label = name;
-      setSearchEnabled(!(typeof id === 'string' && id.startsWith('r:')));
+      setRemoteSearch(typeof id === 'string' && id.startsWith('r:'));
       badges = {};
       listEl.scrollTop = 0;
       refresh();

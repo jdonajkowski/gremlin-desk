@@ -66,9 +66,10 @@
 
       // Markdown paths in the output open rendered in a popout (click).
       // Wrapped rows are joined so a long path that spans rows is still one link.
+      // In a remote terminal the paths are the host's: main asks the host (md.resolve), which answers with a file inside
+      // that project or nothing, and the link opens the host's copy read-only. This computer's disk is never used.
       term.registerLinkProvider({
         provideLinks(y, callback) {
-          if (id.startsWith('r:')) return callback(undefined); // the paths in a remote screen are not this computer's
           const buf = term.buffer.active;
           let first = y - 1;
           while (first > 0 && buf.getLine(first) && buf.getLine(first).isWrapped) first--;
