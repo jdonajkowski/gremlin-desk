@@ -19,6 +19,8 @@
     let renderSeq = 0;
     let query = '';
     let notice = '';
+    let label = ''; // header text when the listing has no root folder to name (remote projects)
+    const searchHint = qEl.placeholder;
     let regex = false;
     let caseSensitive = false;
 
@@ -36,9 +38,9 @@
       // Switched project (or refreshed) while this was loading: the answer is stale.
       if (id !== projectId || into !== cache) return entries;
       if (rel === '' && res) {
-        const name = res.root.split(/[\\/]/).filter(Boolean).pop() || res.root;
+        const name = res.root.split(/[\\/]/).filter(Boolean).pop() || res.root || label || 'Files';
         headEl.textContent = name;
-        headEl.title = res.root;
+        headEl.title = res.root || name;
       }
       cache.set(rel, entries);
       return entries;
@@ -244,11 +246,22 @@
       return render();
     }
 
-    // notice: shown instead of "No project open" when there is no project to list (e.g. a remote session).
-    function setProject(id, text = '') {
+    // Search is not available for remote projects yet: the box says so and stays disabled.
+    function setSearchEnabled(on) {
+      qEl.disabled = regexBtn.disabled = caseBtn.disabled = !on;
+      qEl.placeholder = on ? searchHint : 'Remote search comes next';
+      qEl.title = on ? '' : 'Search on remote projects comes next';
+      if (!on) { qEl.value = ''; query = ''; }
+    }
+
+    // notice: shown instead of "No project open" when there is no project to list.
+    // label: the header for a project whose listing has no root path (remote).
+    function setProject(id, text = '', name = '') {
       if (id === projectId && text === notice) return;
       projectId = id;
       notice = text;
+      label = name;
+      setSearchEnabled(!(typeof id === 'string' && id.startsWith('r:')));
       badges = {};
       listEl.scrollTop = 0;
       refresh();
