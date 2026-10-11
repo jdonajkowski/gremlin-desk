@@ -7,7 +7,7 @@ Phase 1 (0.15.x) lets one Gremlin attach to, start, restart and close Claude ses
 | # | Sub-project | What the user gets | Size | Status |
 |---|---|---|---|---|
 | 2a | Notifications for remote sessions | A desktop notification on the client when a remote Claude needs you or finishes, naming the host | Small | Planned: `plans/2026-10-10-remote-notifications.md` |
-| 2b | Files, Markdown and search on the remote | Browse and open the host's project files, follow Markdown links, search across projects | Large | Not started |
+| 2b | Files, Markdown and search on the remote | Browse and open the host's project files, follow Markdown links, search across projects | Large | 2b-1 (view-only) specified: `specs/2026-10-11-remote-files-design.md`, plans part A and B. Editing (2b-2) later |
 | 2c | Install tools on the remote | A remote Setup tab: see what the host has, install Claude, git or gh there, output streamed back | Medium; security sensitive | Not started |
 | 2d | Project settings on the remote | Session defaults, worktrees, spend and saved layouts for remote projects | Medium; many small requests | Not started |
 | 2e | Hardening | Pairing secrets in the OS keychain (Electron `safeStorage`); Tailscale guidance and a real test of pairing over a Tailscale address; the small deferred items from the phase 1 reviews | Medium | Not started |
