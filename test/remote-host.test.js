@@ -440,7 +440,7 @@ test('projectsChanged: a client that connected while the list was Y still hears 
   assert.equal((await a.next()).list[0].name, 'X');
   s.host.projectsChanged(); // lastProjects = X
   a.close();
-  while (s.host.status().clients) await new Promise((r) => setTimeout(r, 10));
+  await waitFor(() => s.host.status().clients === 0);
   name = 'Y';
   const b = await connect(s.port);
   assert.equal((await b.next()).list[0].name, 'Y');
@@ -448,5 +448,132 @@ test('projectsChanged: a client that connected while the list was Y still hears 
   s.host.projectsChanged();
   assert.equal((await b.until((m) => m.t === 'projects')).list[0].name, 'X');
   b.close();
+  await s.host.close();
+});
+
+const waitFor = async (cond) => { for (let i = 0; i < 200 && !cond(); i++) await new Promise((r) => setTimeout(r, 10)); };
+
+function fakeFiles(over = {}) {
+  const calls = [];
+  return {
+    calls,
+    list: async (id, rel) => { calls.push(['list', id, rel]); return { entries: [{ name: 'a' }] }; },
+    read: async (id, rel) => { calls.push(['read', id, rel]); return { text: 'hi' }; },
+    git: async (id) => { calls.push(['git', id]); return { branch: 'main' }; },
+    ...over
+  };
+}
+
+test('files: list, read and git return the service data with the arguments passed through', async () => {
+  const fs = fakeFiles();
+  const s = await started({ fileService: fs });
+  const c = await connect(s.port);
+  await c.next();
+  assert.deepEqual(await c.request('files.list', { id: 'p1', rel: 'src' }), { t: 'res', rid: 1, ok: true, data: { entries: [{ name: 'a' }] } });
+  assert.equal((await c.request('files.read', { id: 'p1', rel: 'a.txt' })).data.text, 'hi');
+  assert.equal((await c.request('files.git', { id: 'p1' })).data.branch, 'main');
+  assert.deepEqual(fs.calls, [['list', 'p1', 'src'], ['read', 'p1', 'a.txt'], ['git', 'p1']]);
+  c.close();
+  await s.host.close();
+});
+
+test('files: a service error is shown, a thrown error is not', async () => {
+  const s = await started({ fileService: fakeFiles({
+    list: async () => ({ error: 'That path is not allowed' }),
+    read: async () => { throw new Error('ENOENT C:\\secret\\x'); },
+    git: async () => { throw new Error('git failed in C:\\secret'); }
+  }) });
+  const c = await connect(s.port);
+  await c.next();
+  const a = await c.request('files.list', { id: 'p1' });
+  assert.equal(a.ok, false);
+  assert.equal(a.error, 'That path is not allowed');
+  for (const t of ['files.read', 'files.git']) {
+    const r = await c.request(t, { id: 'p1', rel: 'x' });
+    assert.equal(r.ok, false);
+    assert.equal(r.error, 'The request failed');
+  }
+  c.close();
+  await s.host.close();
+});
+
+test('files: arguments of the wrong type are refused before the service is called', async () => {
+  const fs = fakeFiles();
+  const s = await started({ fileService: fs });
+  const c = await connect(s.port);
+  await c.next();
+  const bad = [{ id: 5 }, { id: {} }, { id: null }, {}, { id: [] }, { id: 'p1', rel: 5 }, { id: 'p1', rel: {} }, { id: 'p1', rel: [] }, { id: 'p1', rel: null }, { id: 'p1', rel: ['x'.repeat(200000)], extra: 'y'.repeat(100000) }];
+  for (const t of ['files.list', 'files.read', 'files.git']) {
+    for (const args of bad) {
+      if (t === 'files.git' && typeof args.id === 'string' && args.rel === undefined) continue;
+      if (t === 'files.git' && typeof args.id === 'string') continue; // git ignores rel
+      const r = await c.request(t, args);
+      assert.equal(r.ok, false, t + ' ' + JSON.stringify(args).slice(0, 40));
+      assert.equal(typeof r.error, 'string');
+    }
+  }
+  assert.deepEqual(fs.calls.filter((x) => x[1] !== 'p1' || (x[2] !== undefined && typeof x[2] !== 'string')), [], 'hostile shapes never reached the service');
+  assert.equal(fs.calls.length, 0);
+  assert.equal((await c.request('files.git', { id: 'p1' })).ok, true, 'the connection still works');
+  assert.equal(c.closed, false);
+  c.close();
+  await s.host.close();
+});
+
+test('files: at most 4 requests in flight per client, a finished one frees a slot', async () => {
+  const releases = [];
+  const s = await started({ fileService: fakeFiles({ read: () => new Promise((res) => releases.push(() => res({ text: 'ok' }))) }) });
+  const c = await connect(s.port);
+  await c.next();
+  for (let i = 0; i < 4; i++) c.send({ t: 'files.read', rid: 100 + i, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 4);
+  const fifth = await c.request('files.read', { id: 'p1', rel: 'f' });
+  assert.equal(fifth.ok, false);
+  assert.equal(fifth.error, 'Too many file requests');
+  releases[0]();
+  await c.until((m) => m.t === 'res' && m.rid === 100);
+  c.send({ t: 'files.read', rid: 200, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 5);
+  releases.slice(1).forEach((f) => f());
+  c.close();
+  await s.host.close();
+});
+
+test('files: slots are freed after errors and throws, and a disconnect with requests in flight does not crash', async () => {
+  let mode = 'error';
+  const releases = [];
+  const s = await started({ fileService: fakeFiles({ read: () => {
+    if (mode === 'error') return Promise.resolve({ error: 'nope' });
+    if (mode === 'throw') throw new Error('boom');
+    return new Promise((res) => releases.push(res));
+  } }) });
+  const c = await connect(s.port);
+  await c.next();
+  for (let i = 0; i < 6; i++) assert.equal((await c.request('files.read', { id: 'p1', rel: 'f' })).error, 'nope');
+  mode = 'throw';
+  for (let i = 0; i < 6; i++) assert.equal((await c.request('files.read', { id: 'p1', rel: 'f' })).error, 'The request failed');
+  mode = 'hang';
+  for (let i = 0; i < 3; i++) c.send({ t: 'files.read', rid: 300 + i, id: 'p1', rel: 'f' });
+  await waitFor(() => releases.length >= 3);
+  c.close();
+  await waitFor(() => s.host.status().clients === 0);
+  releases.forEach((r) => r({ text: 'late' }));
+  await new Promise((r) => setTimeout(r, 50));
+  const d = await connect(s.port);
+  await d.next();
+  mode = 'error';
+  assert.equal((await d.request('files.read', { id: 'p1', rel: 'f' })).error, 'nope');
+  d.close();
+  await s.host.close();
+});
+
+test('files: without a file service the requests are unknown', async () => {
+  const s = await started();
+  const c = await connect(s.port);
+  await c.next();
+  const r = await c.request('files.list', { id: 'p1' });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'Unknown request');
+  c.close();
   await s.host.close();
 });

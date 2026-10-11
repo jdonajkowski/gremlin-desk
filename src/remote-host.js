@@ -12,12 +12,13 @@ const LOCK_AFTER = 5;
 const LOCK_MS = 60000;
 const MAX_PENDING = 16; // sockets that have not authenticated yet
 const MAX_INPUT = 65536;
+const MAX_FILE_BUSY = 4; // file requests in flight per client
 class PublicError extends Error {} // only these messages are safe to show a client; anything else may hold host paths
 const dim = (n) => (Number.isInteger(n) && n >= 1 && n <= 500 ? n : undefined);
 
 // getDevices() entries are { id, secret, name? }; name is only used for the log.
 function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSession, openProject, write, resize, restart, closeSession, log = () => {},
-  ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
+  fileService, ringSize = 262144, maxQueued = 8 * 1024 * 1024, now = Date.now, netImpl = net }) {
   const clients = new Set();
   const sockets = new Set(); // every accepted socket, authenticated or not
   const rings = new Map();
@@ -74,6 +75,26 @@ function createRemoteHost({ getDevices, onDeviceSeen = () => {}, snapshot, hasSe
     restart: (c, a) => { if (hasSession(a.id)) { restarted(a.id); restart(a.id, dim(a.cols), dim(a.rows)); } return true; },
     close: (c, a) => { if (hasSession(a.id)) closeSession(a.id); return true; }
   };
+
+  // File requests (read-only, see src/remote-files.js). The service validates paths; here we check the argument types
+  // and cap what one client can have in flight. Only these handlers count against the cap.
+  if (fileService) {
+    const fileCall = (fn) => async (c, a) => {
+      if (typeof a.id !== 'string' || (a.rel !== undefined && typeof a.rel !== 'string')) throw new PublicError('That request is not valid');
+      if ((c.fileBusy || 0) >= MAX_FILE_BUSY) throw new PublicError('Too many file requests');
+      c.fileBusy = (c.fileBusy || 0) + 1;
+      try {
+        const r = await fn(a);
+        if (r && r.error) throw new PublicError(r.error);
+        return r;
+      } finally {
+        c.fileBusy -= 1;
+      }
+    };
+    handlers['files.list'] = fileCall((a) => fileService.list(a.id, a.rel));
+    handlers['files.read'] = fileCall((a) => fileService.read(a.id, a.rel));
+    handlers['files.git'] = fileCall((a) => fileService.git(a.id));
+  }
 
   async function handle(c, msg) {
     if (!msg || typeof msg !== 'object' || typeof msg.t !== 'string') return;
