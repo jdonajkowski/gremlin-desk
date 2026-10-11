@@ -94,6 +94,26 @@ test('isRemoteId matches a host namespace whether or not the host is still paire
   }
 });
 
+test('listEntries keeps typed name/rel/dir entries, caps at 2000 and drops the rest', () => {
+  for (const bad of [null, 'x', [], { entries: 'x' }]) assert.strictEqual(R.listEntries(bad), null);
+  assert.deepStrictEqual(R.listEntries({ entries: [
+    { name: 'a.md', rel: 'docs/a.md', dir: false, size: 5, evil: '<b>' },
+    { name: 'src', rel: 'src', dir: true },
+    { name: 5, rel: 'x', dir: false },
+    { name: 'y', rel: 7, dir: false },
+    { name: 'z', rel: 'z', dir: 'yes' },
+    { name: '', rel: 'e', dir: false },
+    { name: 'n\0', rel: 'n', dir: false },
+    null
+  ] }), [{ name: 'a.md', rel: 'docs/a.md', dir: false }, { name: 'src', rel: 'src', dir: true }]);
+  assert.strictEqual(R.listEntries({ entries: Array.from({ length: 2500 }, (_, i) => ({ name: `f${i}`, rel: `f${i}`, dir: false })) }).length, 2000);
+});
+
+test('looksRemote refuses anything r:-like except a local drive R: path', () => {
+  for (const id of ['R:HOST/x', 'r:', 'r:host', 'r:hostbox/c:\\x', 'R:', 'r:..', 'r:host\\x']) assert.strictEqual(R.looksRemote(id), true, id);
+  for (const id of ['r:\\proj', 'r:/x', 'R:\\proj', 'c:\\users\\me', '/home/r:x', '', null, undefined, 5]) assert.strictEqual(R.looksRemote(id), false, String(id));
+});
+
 test('searchResult marks a reply truncated when it drops file-name rows past 200', () => {
   const r = R.searchResult({ files: Array.from({ length: 201 }, (_, i) => ({ rel: `f${i}` })), hits: [], truncated: false }, 'f', false);
   assert.strictEqual(r.files.length, 200);

@@ -9,6 +9,10 @@ const { parseNsId } = require('./remote-config');
 // (r:\...) does not match: the host part allows only [a-z0-9-] before the slash.
 const isRemoteId = (id) => !!parseNsId(id);
 
+// Anything that looks like a remote id at all (r: not followed by a slash or backslash, any case, even malformed). The
+// Markdown link handlers refuse these outright rather than resolve them locally; a local folder on drive R: is r:\...
+const looksRemote = (id) => typeof id === 'string' && /^r:(?![\\/])/i.test(id);
+
 const MAX_ROWS = 200; // Ctrl+Shift+H, local and remote rows together
 const MAX_FILES = 200;
 const MAX_HITS = 500;
@@ -70,6 +74,16 @@ function mergeFindRows(local, remoteRows, cap = MAX_ROWS) {
   return rows;
 }
 
+// A files.list reply as the files pane reads it: [{ name, rel, dir }] with the types checked, at most 2000, or null.
+const MAX_ENTRIES = 2000;
+function listEntries(reply) {
+  if (!isObj(reply) || !Array.isArray(reply.entries)) return null;
+  return reply.entries
+    .filter((e) => isObj(e) && typeof e.name === 'string' && e.name && e.name.length <= MAX_REL && !e.name.includes('\0') && isRel(e.rel) && typeof e.dir === 'boolean')
+    .slice(0, MAX_ENTRIES)
+    .map((e) => ({ name: e.name, rel: e.rel, dir: e.dir }));
+}
+
 // One toast for the hosts that failed a search ("Host: message; Other: message"), or '' when none is worth showing.
 function findErrorText(errors) {
   return (Array.isArray(errors) ? errors : [])
@@ -103,4 +117,4 @@ function resolvedMd(reply, count) {
   return { index, rel };
 }
 
-module.exports = { isRemoteId, MAX_ROWS, CANCELLED, BUSY, matchCol, searchResult, mergeFindRows, findErrorText, busyHosts, mdCandidates, isMdRel, resolvedMd };
+module.exports = { isRemoteId, looksRemote, listEntries, MAX_ROWS, CANCELLED, BUSY, matchCol, searchResult, mergeFindRows, findErrorText, busyHosts, mdCandidates, isMdRel, resolvedMd };

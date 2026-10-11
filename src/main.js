@@ -1155,7 +1155,7 @@ function resolveRemoteMd(id, candidates) {
 // Candidates come from md-links.js, longest first; the first one that is an existing file wins.
 ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
   // Any r: id is the host's, even when that host was removed meanwhile: never resolved against this computer's disk.
-  if (remoteResults.isRemoteId(id)) return remote.has(id) ? resolveRemoteMd(id, candidates) : null; // never a toast: this runs on hover
+  if (remoteResults.looksRemote(id)) return remote.has(id) ? resolveRemoteMd(id, candidates) : null; // never a toast: this runs on hover
   if (!Array.isArray(candidates)) return null;
   for (let i = 0; i < candidates.length && i < 16; i++) {
     const file = findMd(candidates[i], owner(id));
@@ -1165,7 +1165,7 @@ ipcMain.handle('md:resolve', (_e, { candidates, id }) => {
 });
 ipcMain.on('md:open', (_e, { file: p, id }) => {
   // A remote link opens the host's file (a project-relative path md.resolve gave) in the remote popout, never a local one.
-  if (remoteResults.isRemoteId(id)) return remote.has(id) && remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
+  if (remoteResults.looksRemote(id)) return remote.has(id) && remoteResults.isMdRel(p) ? openRemoteFile(id, p) : undefined;
   const file = findMd(p, owner(id));
   if (file) openMd(file);
 });
@@ -1484,9 +1484,10 @@ ipcMain.on('files:setOpen', (_e, open) => {
 ipcMain.handle('files:list', async (_e, { id, rel }) => {
   if (remoteResults.isRemoteId(id)) {
     const r = await remote.filesList(id, rel);
-    if (!r || r.error || !Array.isArray(r.entries)) { toastOnce(id, (r && r.error) || 'The request failed'); return null; }
+    const entries = r && !r.error ? remoteResults.listEntries(r) : null;
+    if (!entries) { toastOnce(id, (r && r.error) || 'The request failed'); return null; }
     remoteToasted.delete(hostOf(id));
-    return { root: '', entries: r.entries };
+    return { root: '', entries };
   }
   const root = projectPath(id);
   if (!root) return null;
