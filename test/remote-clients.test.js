@@ -236,3 +236,60 @@ test('a malformed projects snapshot from a host is sanitized, never thrown on', 
   assert.deepEqual(t.m.openIds(), ['r:desk/ok']);
   assert.deepEqual(t.m.git(), { 'r:desk/ok': { branch: 'main' } });
 });
+
+test('filesList, filesRead and filesGit ask the host with the host-side id and return its data', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  c.reply = { entries: [] };
+  assert.deepEqual(await t.m.filesList('r:desk/c:\p\a', 'src'), { entries: [] });
+  assert.deepEqual(await t.m.filesRead('r:desk/c:\p\a', 'a.txt'), { entries: [] });
+  assert.deepEqual(await t.m.filesGit('r:desk/c:\p\a'), { entries: [] });
+  assert.deepEqual(c.reqs, [
+    ['files.list', { id: 'c:\p\a', rel: 'src' }],
+    ['files.read', { id: 'c:\p\a', rel: 'a.txt' }],
+    ['files.git', { id: 'c:\p\a' }]
+  ]);
+  c.reqs.length = 0;
+  await t.m.filesList('r:desk/p');
+  assert.deepEqual(c.reqs, [['files.list', { id: 'p' }]], 'no rel key when rel is not a string');
+  assert.ok(!('rel' in c.reqs[0][1]));
+});
+
+test('file requests turn every failure into an { error } and never reject', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  assert.deepEqual(await t.m.filesList('r:desk/p', ''), { error: 'Host is not connected' });
+  assert.deepEqual(c.reqs, [], 'offline: request not called');
+  online(c);
+  const fail = (err) => { c.request = async () => { throw err; }; };
+  fail(Object.assign(new Error('Not a folder'), { fromHost: true }));
+  assert.deepEqual(await t.m.filesRead('r:desk/p', 'x'), { error: 'Not a folder' });
+  fail(new Error('The other computer did not answer'));
+  assert.deepEqual(await t.m.filesGit('r:desk/p'), { error: 'The other computer did not answer' });
+  fail(new Error('Not connected'));
+  assert.deepEqual(await t.m.filesList('r:desk/p', ''), { error: 'Host is not connected' });
+  fail(new Error('boom'));
+  assert.deepEqual(await t.m.filesList('r:desk/p', ''), { error: 'The request failed' });
+  fail('weird');
+  assert.deepEqual(await t.m.filesList('r:desk/p', ''), { error: 'The request failed' });
+  fail(null);
+  assert.deepEqual(await t.m.filesList('r:desk/p', ''), { error: 'The request failed' });
+});
+
+test('file requests for unknown hosts, non-remote ids and hostile arguments resolve with an error', async () => {
+  const t = setup();
+  const c = t.made.desk;
+  online(c);
+  for (const id of ['aux:1', 'c:\local', 'r:nohost/x', 5, {}, undefined, null]) {
+    assert.deepEqual(await t.m.filesList(id, ''), { error: 'Host is not connected' });
+    assert.deepEqual(await t.m.filesRead(id, 'a'), { error: 'Host is not connected' });
+    assert.deepEqual(await t.m.filesGit(id), { error: 'Host is not connected' });
+  }
+  assert.deepEqual(c.reqs, []);
+  for (const rel of [5, {}, undefined]) {
+    const r = await t.m.filesRead('r:desk/p', rel);
+    assert.ok(r === true || r.error === undefined || typeof r.error === 'string');
+  }
+  assert.ok(c.reqs.every((r) => !('rel' in r[1])));
+});

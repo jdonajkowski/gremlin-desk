@@ -76,6 +76,23 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
   };
   const onlineEntries = () => [...entries.values()].filter((e) => e.client.state().state === 'online');
 
+  // File browsing: one request to the host; always resolves, with the reply or { error } (the renderer shows the message).
+  async function fileRequest(t, id, rel, withRel) {
+    const NOT_CONNECTED = { error: 'Host is not connected' };
+    try {
+      const p = typeof id === 'string' ? parts(id) : null;
+      if (!p || p.entry.client.state().state !== 'online') return NOT_CONNECTED;
+      const args = { id: p.projectId };
+      if (withRel && typeof rel === 'string') args.rel = rel;
+      return await p.entry.client.request(t, args);
+    } catch (err) {
+      const msg = err && typeof err.message === 'string' ? err.message : '';
+      if (err && err.fromHost && msg) return { error: msg };
+      if (msg === 'The other computer did not answer') return { error: msg };
+      return msg === 'Not connected' ? NOT_CONNECTED : { error: 'The request failed' };
+    }
+  }
+
   return {
     sync,
     has: (id) => !!parts(id),
@@ -112,6 +129,9 @@ function createRemoteClients({ getHosts, createClient = createRemoteClient, send
       try { await p.entry.client.request('close', { id: p.projectId }); } catch { /* host gone: nothing to close */ }
       p.entry.client.detach(p.projectId);
     },
+    filesList: (id, rel) => fileRequest('files.list', id, rel, true),
+    filesRead: (id, rel) => fileRequest('files.read', id, rel, true),
+    filesGit: (id) => fileRequest('files.git', id, undefined, false),
     reconnect(hostId) { const e = entries.get(hostId); if (e) e.client.reconnect(); },
     stopAll() { for (const e of entries.values()) e.client.stop(); entries.clear(); }
   };
